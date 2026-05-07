@@ -1184,39 +1184,36 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	sendErr := sendWithAttachedUpdates(sess, prompt)
 	if sendErr != nil && !isCanceledTurnError(sendErr) {
-		log.Printf("[session] turn.send.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, sendErr)
-		if in.OnUpdate != nil {
-			in.OnUpdate(agenttypes.Event{
-				Type: agenttypes.EventTypeRecovery,
-				Data: agenttypes.RecoveryStatus{Message: "遇到错误，重试中..."},
-			})
-		}
 		if !sawAssistantChunk {
-			responseText = ""
-			lastResponseUpdateType = ""
-			auxBuffer = auxBuffer[:0]
-			thoughtBuffer.Reset()
-		}
-		recoveredSess, recoveredErr := s.recoverAgentTurn(turnCtx, SendRecoveryInput{
-			RootID:             in.RootID,
-			SessionKey:         current.Key,
-			Manager:            manager,
-			Current:            current,
-			AgentName:          in.Agent,
-			Model:              in.Model,
-			Mode:               in.Mode,
-			Effort:             in.Effort,
-			RootAbs:            rootAbs,
-			CurrentSession:     sess,
-			Prompt:             prompt,
-			SawAssistantChunk:  sawAssistantChunk,
-			SendWithAttachment: sendWithAttachedUpdates,
-		})
-		if recoveredErr != nil {
-			sendErr = recoveredErr
+			log.Printf("[session] turn.send.no_response root=%s session=%s agent=%s action=fail_without_recovery", in.RootID, current.Key, in.Agent)
 		} else {
-			sess = recoveredSess
-			sendErr = nil
+			if in.OnUpdate != nil {
+				in.OnUpdate(agenttypes.Event{
+					Type: agenttypes.EventTypeRecovery,
+					Data: agenttypes.RecoveryStatus{Message: "遇到错误，重试中..."},
+				})
+			}
+			recoveredSess, recoveredErr := s.recoverAgentTurn(turnCtx, SendRecoveryInput{
+				RootID:             in.RootID,
+				SessionKey:         current.Key,
+				Manager:            manager,
+				Current:            current,
+				AgentName:          in.Agent,
+				Model:              in.Model,
+				Mode:               in.Mode,
+				Effort:             in.Effort,
+				RootAbs:            rootAbs,
+				CurrentSession:     sess,
+				Prompt:             prompt,
+				SawAssistantChunk:  sawAssistantChunk,
+				SendWithAttachment: sendWithAttachedUpdates,
+			})
+			if recoveredErr != nil {
+				sendErr = recoveredErr
+			} else {
+				sess = recoveredSess
+				sendErr = nil
+			}
 		}
 	}
 	flushThought()

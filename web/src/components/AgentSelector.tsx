@@ -212,9 +212,6 @@ export function AgentSelector({
 
   const handleAgentRowClick = useCallback(
     (entry: AgentStatus) => {
-      if (!entry.available) {
-        return;
-      }
       handleAgentSelect(entry.name, "");
     },
     [handleAgentSelect]
@@ -222,7 +219,7 @@ export function AgentSelector({
 
   const handleSubmenuToggle = useCallback(
     (entry: AgentStatus) => {
-      if (!entry.available || ((entry.models?.length ?? 0) === 0 && (entry.modes?.length ?? 0) === 0)) {
+      if ((entry.models?.length ?? 0) === 0 && (entry.modes?.length ?? 0) === 0) {
         return;
       }
       setErrorAgent(null);
@@ -401,20 +398,19 @@ export function AgentSelector({
                       width: "100%",
                       padding: "10px 12px",
                       background: isExpanded || isSelected ? "rgba(59, 130, 246, 0.08)" : "transparent",
-                      opacity: a.available ? 1 : 0.6,
+                      opacity: 1,
                     }}
                   >
                     <button
                       type="button"
                       onClick={() => handleAgentRowClick(a)}
-                      disabled={!a.available}
                       style={{
                         display: "contents",
                         border: "none",
                         background: "transparent",
                         padding: 0,
                         margin: 0,
-                        cursor: a.available ? "pointer" : "not-allowed",
+                        cursor: "pointer",
                         textAlign: "left",
                       }}
                     >
@@ -425,9 +421,7 @@ export function AgentSelector({
                           overflow: "hidden",
                           textOverflow: "ellipsis",
                           fontSize: "13px",
-                          color: !a.available
-                            ? "var(--text-secondary)"
-                            : isExpanded || isSelected
+                          color: isExpanded || isSelected
                             ? "#3b82f6"
                             : "var(--text-primary)",
                           fontWeight: isExpanded || isSelected ? 500 : 400,
@@ -489,7 +483,7 @@ export function AgentSelector({
                             border: "none",
                             background: "transparent",
                             color: isExpanded ? "#3b82f6" : "var(--text-secondary)",
-                            cursor: a.available ? "pointer" : "not-allowed",
+                            cursor: "pointer",
                             flexShrink: 0,
                           }}
                         >

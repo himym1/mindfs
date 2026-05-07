@@ -179,15 +179,29 @@ func (i *Importer) scanSessionFiles(rootPath string, before, after time.Time, li
 }
 
 func (i *Importer) projectDir(rootPath string) string {
+	dirName := claudeProjectDirName(rootPath)
+	if dirName == "" {
+		return ""
+	}
+	return filepath.Join(i.baseDir, dirName)
+}
+
+func claudeProjectDirName(rootPath string) string {
 	rootPath = normalizeComparablePath(rootPath)
 	if rootPath == "" {
 		return ""
 	}
+	return sanitizeClaudeProjectPath(rootPath)
+}
+
+func sanitizeClaudeProjectPath(path string) string {
 	replacer := strings.NewReplacer(
-		string(os.PathSeparator), "-",
+		"/", "-",
+		"\\", "-",
+		":", "-",
 		".", "-",
 	)
-	return filepath.Join(i.baseDir, replacer.Replace(rootPath))
+	return replacer.Replace(path)
 }
 
 func (i *Importer) storeSessionFiles(items []claudeSessionFile) {

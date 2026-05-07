@@ -249,7 +249,8 @@ func (p *Prober) Start(ctx context.Context) {
 	// 首次全量探测放到后台，避免阻塞服务启动和请求处理。
 	go p.ProbeAll(ctx)
 
-	// 启动定期探测：分别重试未安装命令和已安装但不可用的 Agent。
+	// 启动定期探测：只重试未安装命令。运行时失败不做主动恢复探测，
+	// 避免周期性打开 agent probe session。
 	ticker := time.NewTicker(p.probeInterval)
 	go func() {
 		defer ticker.Stop()
@@ -257,7 +258,6 @@ func (p *Prober) Start(ctx context.Context) {
 			select {
 			case <-ticker.C:
 				p.probeMissingCommands()
-				p.probeFailedInstalledOnly(ctx)
 			case <-p.stopCh:
 				return
 			case <-ctx.Done():
@@ -477,21 +477,6 @@ func probeInstalledAgentWithPool(ctx context.Context, name string, def Definitio
 		sess, err = pool.GetOrCreate(openCtx, openInput)
 	}
 	if err != nil {
-		status.ProbeError = err.Error()
-		return status
-	}
-
-	interactionCtx := ctx
-	interactionCancel := func() {}
-	if timeout, ok := probeInteractionTimeoutForPhase(phase); ok {
-		interactionCtx, interactionCancel = context.WithTimeout(ctx, timeout)
-	}
-	defer interactionCancel()
-	if err := VerifySessionInteraction(interactionCtx, sess); err != nil {
-		if hint, ok := pool.KillAgentProcess(name, 750*time.Millisecond); ok {
-			status.ProbeError = hint
-			return status
-		}
 		status.ProbeError = err.Error()
 		return status
 	}

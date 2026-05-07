@@ -91,17 +91,27 @@ export type SessionItem = {
   created_at?: string;
   updated_at?: string;
   closed_at?: string;
+  context_window?: {
+    totalTokens: number;
+    modelContextWindow: number;
+  };
   search_seq?: number;
   search_snippet?: string;
   search_match_type?: "name" | "user" | "reply";
   related_files?: RelatedFile[];
   exchanges?: Array<{
+    seq?: number;
     role?: string;
+    agent?: string;
     content?: string;
     timestamp?: string;
     model?: string;
     mode?: string;
     effort?: string;
+    context_window?: {
+      totalTokens: number;
+      modelContextWindow: number;
+    };
   }>;
   pending?: boolean;
 };
@@ -165,6 +175,15 @@ function toSessionItem(
       typeof session?.updated_at === "string" ? session.updated_at : undefined,
     closed_at:
       typeof session?.closed_at === "string" ? session.closed_at : undefined,
+    context_window:
+      session?.context_window &&
+      Number(session.context_window.totalTokens) > 0 &&
+      Number(session.context_window.modelContextWindow) > 0
+        ? {
+            totalTokens: Number(session.context_window.totalTokens),
+            modelContextWindow: Number(session.context_window.modelContextWindow),
+          }
+        : undefined,
     search_seq:
       typeof session?.search_seq === "number" ? session.search_seq : undefined,
     search_snippet:
@@ -2104,7 +2123,10 @@ export function App({ onGoHome }: AppProps) {
         const list = [...(prevList || [])];
         for (let i = list.length - 1; i >= 0; i -= 1) {
           const item = list[i];
-          if (item?.role === "agent" || item?.role === "assistant") {
+          if (
+            (item?.role === "agent" || item?.role === "assistant") &&
+            String(item?.content || "").trim()
+          ) {
             list[i] = {
               ...item,
               context_window: {
@@ -2123,6 +2145,10 @@ export function App({ onGoHome }: AppProps) {
         sessionCacheRef.current[cacheKey] = {
           ...(cached as any),
           exchanges,
+          context_window: {
+            totalTokens,
+            modelContextWindow,
+          },
           updated_at: new Date().toISOString(),
         } as Session;
       }
@@ -2135,6 +2161,10 @@ export function App({ onGoHome }: AppProps) {
         return {
           ...(prev as any),
           exchanges: stampList((((prev as any).exchanges || []) as Exchange[])),
+          context_window: {
+            totalTokens,
+            modelContextWindow,
+          },
         } as SessionItem;
       });
       const drawer = drawerSessionByRootRef.current[rootID];
@@ -2142,6 +2172,10 @@ export function App({ onGoHome }: AppProps) {
         setDrawerSessionForRoot(rootID, {
           ...(drawer as any),
           exchanges: stampList((((drawer as any).exchanges || []) as Exchange[])),
+          context_window: {
+            totalTokens,
+            modelContextWindow,
+          },
         } as Session);
       }
       bumpCacheVersion();
