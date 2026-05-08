@@ -3202,21 +3202,27 @@ export function App({ onGoHome }: AppProps) {
         effectiveAgentMode = agentMode || "",
         effectiveEffort = effort || "";
       if (sendSessionKey && session) {
+        const targetSessionKey = sendSessionKey;
         const previousAgent = session.agent || "";
+        const useTargetSessionDefaults =
+          !!currentBoundSessionKey && currentBoundSessionKey !== targetSessionKey;
         effectiveMode = normalizeMode(session.type as any);
-        effectiveAgent = agent || previousAgent || "";
+        effectiveAgent =
+          (useTargetSessionDefaults ? previousAgent : agent) ||
+          previousAgent ||
+          "";
         effectiveModel =
-          model ||
+          (useTargetSessionDefaults ? session.model || "" : model) ||
           (effectiveAgent === previousAgent ? session.model || "" : "");
         effectiveAgentMode =
-          agentMode ||
+          (useTargetSessionDefaults ? (session as any).mode || "" : agentMode) ||
           (effectiveAgent === previousAgent ? (session as any).mode || "" : "");
         effectiveEffort =
-          effort ||
+          (useTargetSessionDefaults ? (session as any).effort || "" : effort) ||
           (effectiveAgent === previousAgent ? (session as any).effort || "" : "");
         updateSessionAgentForKey(
           activeRoot,
-          sendSessionKey || undefined,
+          targetSessionKey,
           effectiveAgent,
           effectiveModel,
           effectiveAgentMode,
@@ -3229,8 +3235,8 @@ export function App({ onGoHome }: AppProps) {
           mode: effectiveAgentMode,
           effort: effectiveEffort,
         } as Session;
-        setBoundSessionForRoot(activeRoot, sendSessionKey);
-        setSelectedPendingByKey(sendSessionKey || undefined, true);
+        setBoundSessionForRoot(activeRoot, targetSessionKey);
+        setSelectedPendingByKey(targetSessionKey, true);
         setDrawerSessionForRoot(activeRoot, {
           ...(session as any),
           pending: true,
@@ -3371,9 +3377,10 @@ export function App({ onGoHome }: AppProps) {
         delete pendingRequestRef.current[requestId];
       }
       if (!sent && sendSessionKey) {
-        setSelectedPendingByKey(sendSessionKey || undefined, false);
+        const failedSessionKey = sendSessionKey;
+        setSelectedPendingByKey(failedSessionKey, false);
         const latest = drawerSessionByRootRef.current[activeRoot];
-        if (latest && latest.key === sendSessionKey) {
+        if (latest && latest.key === failedSessionKey) {
           setDrawerSessionForRoot(activeRoot, {
             ...(latest as any),
             pending: false,
@@ -5910,8 +5917,16 @@ export function App({ onGoHome }: AppProps) {
           rootSessionKey(currentRootId, activeBoundSessionKey)
         ] as any)
       : null;
+  const isDetachedMainSessionTarget =
+    !!activeBoundSessionKey &&
+    selectedInCurrentRoot &&
+    !!selectedKey &&
+    selectedKey !== activeBoundSessionKey &&
+    interactionMode !== "drawer";
   const actionBarSession = activeBoundSessionKey
-    ? (currentSession as any) || boundFromCache || boundFromSelected
+    ? isDetachedMainSessionTarget
+      ? (selectedSession as any)
+      : (currentSession as any) || boundFromCache || boundFromSelected
     : selectedInCurrentRoot
       ? (selectedSession as any)
       : null;
@@ -5921,11 +5936,7 @@ export function App({ onGoHome }: AppProps) {
     interactionMode !== "drawer";
   const canOpenSessionDrawer = !!activeBoundSessionKey && !isBoundSessionInMain;
   const detachedBoundSession =
-    !!activeBoundSessionKey &&
-    selectedInCurrentRoot &&
-    !!selectedKey &&
-    selectedKey !== activeBoundSessionKey &&
-    !isDrawerOpen;
+    isDetachedMainSessionTarget && !isDrawerOpen;
 
   const matchedPlugin = useMemo(() => {
     if (!currentRootId || !file) return null;
@@ -7082,20 +7093,27 @@ export function App({ onGoHome }: AppProps) {
                 selectedKey === activeBoundSessionKey &&
                 interactionMode !== "drawer";
               if (isBoundSessionInMain) return;
+              const isDrawerCurrentlyOpen =
+                !!drawerOpenByRootRef.current[rootID || ""];
+              if (isDrawerCurrentlyOpen) {
+                interactionModeRef.current = "main";
+                setInteractionMode("main");
+                setDrawerOpenForRoot(rootID, false);
+                return;
+              }
               setInteractionMode("drawer");
-              setDrawerOpenForRoot(
-                rootID,
-                !(drawerOpenByRootRef.current[rootID || ""] || false),
-              );
+              setDrawerOpenForRoot(rootID, true);
             }}
           />
         }
         drawer={
           <BottomSheet
             isOpen={isDrawerOpen}
-            onClose={() =>
-              setDrawerOpenForRoot(currentRootIdRef.current, false)
-            }
+            onClose={() => {
+              interactionModeRef.current = "main";
+              setInteractionMode("main");
+              setDrawerOpenForRoot(currentRootIdRef.current, false);
+            }}
             onExpand={() => {
               handleSelectSession(currentSession);
               setDrawerOpenForRoot(currentRootIdRef.current, false);
