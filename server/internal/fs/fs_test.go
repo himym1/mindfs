@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,42 +92,40 @@ func TestSharedFileWatcherShouldIgnoreLargeGeneratedDirectories(t *testing.T) {
 	}
 }
 
-func TestSharedFileWatcherSkipsRecursiveWatchForHighFanoutDirectory(t *testing.T) {
+func TestSharedFileWatcherWatchesOnlyRequestedDirectory(t *testing.T) {
 	rootDir := t.TempDir()
-	wideDir := filepath.Join(rootDir, "wide")
-	if err := os.Mkdir(wideDir, 0o755); err != nil {
-		t.Fatalf("Mkdir returned error: %v", err)
-	}
-	for i := 0; i <= maxDirectChildDirsRecursiveWatch; i++ {
-		if err := os.Mkdir(filepath.Join(wideDir, fmt.Sprintf("dir-%03d", i)), 0o755); err != nil {
-			t.Fatalf("Mkdir child %d returned error: %v", i, err)
-		}
-	}
-
-	root := NewRootInfo("mindfs", "mindfs", rootDir)
-	watcher := &SharedFileWatcher{root: root}
-	if !watcher.shouldSkipRecursiveWatch(wideDir) {
-		t.Fatalf("shouldSkipRecursiveWatch(%q) = false, want true", wideDir)
-	}
-}
-
-func TestSharedFileWatcherDoesNotCountIgnoredChildrenForFanoutLimit(t *testing.T) {
-	rootDir := t.TempDir()
-	dir := filepath.Join(rootDir, "deps")
-	if err := os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rootDir, "a", "b", "c"), 0o755); err != nil {
 		t.Fatalf("MkdirAll returned error: %v", err)
 	}
-	for i := 0; i < maxDirectChildDirsRecursiveWatch; i++ {
-		if err := os.Mkdir(filepath.Join(dir, fmt.Sprintf("dir-%03d", i)), 0o755); err != nil {
-			t.Fatalf("Mkdir child %d returned error: %v", i, err)
+
+	root := NewRootInfo("mindfs", "mindfs", rootDir)
+	watcher, err := NewSharedFileWatcher(root, nil)
+	if err != nil {
+		t.Fatalf("NewSharedFileWatcher returned error: %v", err)
+	}
+	defer watcher.Close()
+
+	assertWatched := func(path string, want bool) {
+		t.Helper()
+		watcher.mu.RLock()
+		_, got := watcher.watchedDirs[filepath.Clean(path)]
+		watcher.mu.RUnlock()
+		if got != want {
+			t.Fatalf("watchedDirs[%q] = %v, want %v", path, got, want)
 		}
 	}
 
-	root := NewRootInfo("mindfs", "mindfs", rootDir)
-	watcher := &SharedFileWatcher{root: root}
-	if watcher.shouldSkipRecursiveWatch(dir) {
-		t.Fatalf("shouldSkipRecursiveWatch(%q) = true, want false", dir)
+	assertWatched(rootDir, true)
+	assertWatched(filepath.Join(rootDir, "a"), false)
+	assertWatched(filepath.Join(rootDir, "a", "b"), false)
+	assertWatched(filepath.Join(rootDir, "a", "b", "c"), false)
+
+	if err := watcher.WatchDir("a"); err != nil {
+		t.Fatalf("WatchDir returned error: %v", err)
 	}
+	assertWatched(filepath.Join(rootDir, "a"), true)
+	assertWatched(filepath.Join(rootDir, "a", "b"), false)
+	assertWatched(filepath.Join(rootDir, "a", "b", "c"), false)
 }
 
 func TestRootInfoReadFileDecodesGB18030CodeFile(t *testing.T) {

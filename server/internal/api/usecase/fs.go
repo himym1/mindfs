@@ -52,7 +52,6 @@ func (s *Service) ListTree(_ context.Context, in ListTreeInput) (ListTreeOutput,
 	if err := s.ensureRegistry(); err != nil {
 		return ListTreeOutput{}, err
 	}
-	s.ensureFileWatcher(in.RootID)
 	root, err := s.Registry.GetRoot(in.RootID)
 	if err != nil {
 		return ListTreeOutput{}, err
@@ -69,11 +68,24 @@ func (s *Service) ListTree(_ context.Context, in ListTreeInput) (ListTreeOutput,
 	if err := root.ValidateRelativePath(dir); err != nil {
 		return ListTreeOutput{}, err
 	}
+	s.ensureFileWatcher(in.RootID, dir)
 	entries, err := root.ListEntries(dir)
 	if err != nil {
 		return ListTreeOutput{}, err
 	}
 	return ListTreeOutput{Entries: entries}, nil
+}
+
+func parentDir(path string) string {
+	clean := strings.Trim(filepath.ToSlash(path), "/")
+	if clean == "" || clean == "." {
+		return "."
+	}
+	idx := strings.LastIndex(clean, "/")
+	if idx <= 0 {
+		return "."
+	}
+	return clean[:idx]
 }
 
 func (s *Service) OpenFileRaw(_ context.Context, in OpenFileRawInput) (OpenFileRawOutput, error) {
@@ -242,7 +254,6 @@ func (s *Service) ReadFile(ctx context.Context, in ReadFileInput) (ReadFileOutpu
 	if err := s.ensureRegistry(); err != nil {
 		return ReadFileOutput{}, err
 	}
-	s.ensureFileWatcher(in.RootID)
 	root, err := s.Registry.GetRoot(in.RootID)
 	if err != nil {
 		return ReadFileOutput{}, err
@@ -254,6 +265,7 @@ func (s *Service) ReadFile(ctx context.Context, in ReadFileInput) (ReadFileOutpu
 	if err != nil {
 		return ReadFileOutput{}, err
 	}
+	s.ensureFileWatcher(in.RootID, parentDir(path))
 	result, err := root.ReadFile(path, in.MaxBytes, in.Cursor, in.ReadMode)
 	if err != nil {
 		return ReadFileOutput{}, err
@@ -684,7 +696,7 @@ func (s *Service) RemoveManagedDir(_ context.Context, in RemoveManagedDirInput) 
 	return RemoveManagedDirOutput{Dir: dir}, nil
 }
 
-func (s *Service) ensureFileWatcher(rootID string) {
+func (s *Service) ensureFileWatcher(rootID, dir string) {
 	if strings.TrimSpace(rootID) == "" {
 		return
 	}
@@ -696,4 +708,8 @@ func (s *Service) ensureFileWatcher(rootID string) {
 	if err != nil || watcher == nil {
 		return
 	}
+	if strings.TrimSpace(dir) == "" {
+		dir = "."
+	}
+	_ = watcher.WatchDir(dir)
 }
