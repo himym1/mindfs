@@ -12,6 +12,44 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function () {
+        var notice = "版本太老，请重新安装最新版 mindfs";
+        var shown = false;
+        function isRelayNodePage() {
+          return /^\/n\/[^/]+(?:\/|$)/.test(window.location.pathname);
+        }
+        function isMainAsset(url) {
+          if (!url) {
+            return false;
+          }
+          var parsed;
+          try {
+            parsed = new URL(url, window.location.href);
+          } catch (_) {
+            return false;
+          }
+          if (parsed.origin !== window.location.origin) {
+            return false;
+          }
+          return /^\/(?:mindfs-assets|assets)\/index-[^/]+\.(?:js|css)$/i.test(parsed.pathname);
+        }
+        function showNotice() {
+          if (shown || !isRelayNodePage()) {
+            return;
+          }
+          shown = true;
+          window.alert(notice);
+        }
+        window.addEventListener("error", function (event) {
+          var target = event.target;
+          if (!target || target === window || !isMainAsset(target.src || target.href)) {
+            return;
+          }
+          showNotice();
+        }, true);
+      })();
+    </script>
     <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>
