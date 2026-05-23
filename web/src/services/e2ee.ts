@@ -33,6 +33,11 @@ type SessionContext = {
   transportKeyBytes: Uint8Array;
 };
 
+type ProtectedRequest = {
+  init: RequestInit;
+  session: SessionContext;
+};
+
 export type NativeE2EESession = {
   required: boolean;
   nodeId: string;
@@ -246,31 +251,67 @@ class E2EEService {
     if (!this.required) {
       return fetch(input, init);
     }
-    const buildInit = async (): Promise<RequestInit> => {
-      const session = await this.ensureSession();
-      if (!session) {
-        throw new Error("e2ee_required");
-      }
-      const method = String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
-      const headers = await this.requestProofHeaders(session, method, input, init.headers || (input instanceof Request ? input.headers : undefined));
-      const next: RequestInit = { ...init, method, headers };
-      if (init.body !== undefined && init.body !== null && method !== "GET" && method !== "HEAD") {
-        const plaintext = protectedBodyText(init.body);
-        const envelope = await encryptBytes(session.transportKey, new TextEncoder().encode(plaintext));
-        next.body = JSON.stringify(envelope);
-        headers.set("Content-Type", "application/json");
-      }
-      return next;
-    };
-
-    let response = await fetch(input, await buildInit());
+    let request = await this.buildProtectedRequest(input, init);
+    let response = await fetch(input, request.init);
     if (response.status === 401) {
       const payload = (await response.clone().json().catch(() => ({}))) as { error?: string };
-      if (this.handleServerError(String(payload.error || ""))) {
-        response = await fetch(input, await buildInit());
+      if (await this.recoverProtectedSession(String(payload.error || ""), request.session)) {
+        request = await this.buildProtectedRequest(input, init);
+        response = await fetch(input, request.init);
       }
     }
     return response;
+  }
+
+  private async buildProtectedRequest(input: RequestInfo | URL, init: RequestInit): Promise<ProtectedRequest> {
+    const session = await this.ensureSession();
+    if (!session) {
+      throw new Error("e2ee_required");
+    }
+    const method = String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+    const headers = await this.requestProofHeaders(session, method, input, init.headers || (input instanceof Request ? input.headers : undefined));
+    const next: RequestInit = { ...init, method, headers };
+    if (init.body !== undefined && init.body !== null && method !== "GET" && method !== "HEAD") {
+      const plaintext = protectedBodyText(init.body);
+      const envelope = await encryptBytes(session.transportKey, new TextEncoder().encode(plaintext));
+      next.body = JSON.stringify(envelope);
+      headers.set("Content-Type", "application/json");
+    }
+    return { init: next, session };
+  }
+
+  private async recoverProtectedSession(code: string, failedSession: SessionContext): Promise<boolean> {
+    const normalized = String(code || "").trim();
+    if (!normalized) {
+      return false;
+    }
+    if (
+      this.session &&
+      this.session !== failedSession &&
+      (
+        normalized === "e2ee_session_missing" ||
+        normalized === "e2ee_session_expired" ||
+        normalized === "e2ee_proof_invalid"
+      )
+    ) {
+      return true;
+    }
+    if (
+      normalized === "e2ee_session_missing" ||
+      normalized === "e2ee_session_expired"
+    ) {
+      this.session = null;
+      if (!this.hasSecret()) {
+        this.emit();
+      }
+      await this.ensureSession();
+      return true;
+    }
+    if (normalized === "e2ee_proof_invalid") {
+      this.clearSecret();
+      return true;
+    }
+    return false;
   }
 
   async protectedJSON<T>(input: RequestInfo | URL, init: RequestInit = {}): Promise<T> {
