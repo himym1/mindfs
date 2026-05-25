@@ -1337,11 +1337,14 @@ if (useInnerScrollContainer && !container) {
                 type="button"
                 onClick={() => {
                   if (!promptSaveContent) {
-                    reportError("file.write_failed", "消息内容为空，无法复制");
+                    reportError("clipboard.write_failed", "消息内容为空，无法复制");
                     return;
-                    }
-                    const markCopied = () => {
-                      setCopiedMessageKeys((prev) => ({ ...prev, [promptKey]: true }));
+                  }
+                  const markCopied = () => {
+                    setCopiedMessageKeys((prev) => ({
+                      ...prev,
+                      [promptKey]: true,
+                    }));
                     if (copyResetTimersRef.current[promptKey]) {
                       window.clearTimeout(copyResetTimersRef.current[promptKey]);
                     }
@@ -1352,13 +1355,13 @@ if (useInnerScrollContainer && !container) {
                         return next;
                       });
                       delete copyResetTimersRef.current[promptKey];
-                     }, 1000);
-                   };
-                   void copyText(promptSaveContent)
-                     .then(markCopied)
-                     .catch((err) => {
+                    }, 1000);
+                  };
+                  void copyText(promptSaveContent)
+                    .then(markCopied)
+                    .catch((err) => {
                       reportError(
-                        "file.write_failed",
+                        "clipboard.write_failed",
                         String((err as Error)?.message || "复制失败"),
                       );
                     });
@@ -1438,7 +1441,7 @@ if (useInnerScrollContainer && !container) {
                   onClick={() => {
                     if (!assistantMarkdownContent) {
                       reportError(
-                        "file.write_failed",
+                        "clipboard.write_failed",
                         "消息内容为空，无法复制",
                       );
                       return;
@@ -1466,7 +1469,7 @@ if (useInnerScrollContainer && !container) {
                       })
                       .catch((err) => {
                         reportError(
-                          "file.write_failed",
+                          "clipboard.write_failed",
                           String((err as Error)?.message || "复制失败"),
                         );
                       });
