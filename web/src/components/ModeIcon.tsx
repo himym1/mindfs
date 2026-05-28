@@ -20,9 +20,13 @@ export function ModeIcon({ type, size = "1em", style }: ModeIconProps) {
 
 function ChatIcon({ size, style }: Omit<ModeIconProps, "type">) {
   return (
-    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 32 32" style={style} aria-hidden="true">
-      <path d="M0 0h32v32H0z" fill="none" />
-      <path fill="currentColor" stroke="currentColor" strokeWidth="0.75" strokeLinejoin="round" d="M16 1.999c-7.732 0-14 6.268-14 14c0 2.37.59 4.605 1.631 6.563l-1.572 5.527a1.5 1.5 0 0 0 1.853 1.853L9.44 28.37A13.94 13.94 0 0 0 16 29.999c7.732 0 14-6.268 14-14s-6.268-14-14-14m0 27a13 13 0 0 1-6.09-1.512l-.355-.189l-5.916 1.683a.5.5 0 0 1-.144.021a.503.503 0 0 1-.474-.639l1.682-5.915l-.189-.355A13 13 0 0 1 3 16C3 8.832 8.832 3 16 3s13 5.832 13 13s-5.832 12.999-13 12.999M21.5 13h-11a.5.5 0 0 1 0-1h11a.5.5 0 0 1 0 1m-4 6h-7a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1" />
+    <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 12 12" style={{ color: "#3b82f6", ...style }} aria-hidden="true">
+      <path d="M0 0h12v12H0z" fill="none" />
+      <path
+        fill="currentColor"
+        transform="translate(6 6) scale(1.08) translate(-6 -6)"
+        d="M4 5.5a.5.5 0 0 1 .5-.5h3a.5.5 0 1 1 0 1h-3a.5.5 0 0 1-.5-.5M4.5 7a.5.5 0 0 0 0 1h2a.5.5 0 0 0 0-1zM1 6a5 5 0 1 1 2.59 4.382l-1.944.592a.5.5 0 0 1-.624-.624l.592-1.947A5 5 0 0 1 1 6m5-4a4 4 0 0 0-3.417 6.08a.5.5 0 0 1 .051.406l-.383 1.259l1.257-.383a.5.5 0 0 1 .407.052A4 4 0 1 0 6 2"
+      />
     </svg>
   );
 }

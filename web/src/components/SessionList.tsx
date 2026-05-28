@@ -454,7 +454,7 @@ function SessionCard({
       <div
         style={{
           textAlign: "left" as const,
-          padding: "7px 4px 7px 6px",
+          padding: "7px 4px 7px 2px",
           borderRadius: "8px",
           border: "1px solid transparent",
           background: selected ? "rgba(59, 130, 246, 0.1)" : "transparent",
@@ -462,7 +462,7 @@ function SessionCard({
           minWidth: 0,
           display: "flex",
           alignItems: "center",
-          gap: "8px",
+          gap: "6px",
           transition: "all 0.15s ease",
         }}
       >

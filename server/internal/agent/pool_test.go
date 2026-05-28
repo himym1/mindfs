@@ -208,8 +208,13 @@ func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	if cfg.RelayBaseURL != override.RelayBaseURL {
 		t.Fatalf("relay base url = %q", cfg.RelayBaseURL)
 	}
-	if !reflect.DeepEqual(cfg.Shells, override.Shells) {
-		t.Fatalf("shells = %#v, want %#v", cfg.Shells, override.Shells)
+	wantShells := []Shell{
+		{Command: "fish", Args: []string{"-i", "-c"}},
+		{Command: "zsh", Args: []string{"-ic"}},
+		{Command: "bash", Args: []string{"-ic"}},
+	}
+	if !reflect.DeepEqual(cfg.Shells, wantShells) {
+		t.Fatalf("shells = %#v, want %#v", cfg.Shells, wantShells)
 	}
 	if len(cfg.Agents) != 3 {
 		t.Fatalf("agents length = %d, want 3", len(cfg.Agents))
@@ -229,25 +234,31 @@ func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadConfigPrefersWorkingDirAgentsJSONForRelativeLaunch(t *testing.T) {
-	t.Setenv(configPathEnvKey, "")
+func TestInstalledDefaultConfigPathPrefersExecutableDirectory(t *testing.T) {
 	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "agents.json")
-	if err := os.WriteFile(configPath, []byte(`{"agents":[{"name":"local-agent","command":"local-agent"}]}`), 0o644); err != nil {
+	exeDir := filepath.Join(tempDir, "archive")
+	if err := os.MkdirAll(exeDir, 0o755); err != nil {
+		t.Fatalf("mkdir exe dir: %v", err)
+	}
+	configPath := filepath.Join(exeDir, "agents.json")
+	if err := os.WriteFile(configPath, []byte(`{"agents":[{"name":"zip-agent","command":"zip-agent"}]}`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	t.Chdir(tempDir)
-	originalArgs := os.Args
-	os.Args = []string{"./mindfs"}
-	t.Cleanup(func() { os.Args = originalArgs })
-
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
+	got := installedDefaultConfigPathFromExecutable(filepath.Join(exeDir, "mindfs.exe"))
+	if got != configPath {
+		t.Fatalf("installedDefaultConfigPathFromExecutable() = %q, want %q", got, configPath)
 	}
-	if _, ok := cfg.GetAgent("local-agent"); !ok {
-		t.Fatalf("expected local-agent from working directory agents.json")
+}
+
+func TestInstalledDefaultConfigPathFallsBackToInstalledLayout(t *testing.T) {
+	tempDir := t.TempDir()
+	exeDir := filepath.Join(tempDir, "bin")
+	want := filepath.Join(tempDir, "share", "mindfs", "agents.json")
+
+	got := installedDefaultConfigPathFromExecutable(filepath.Join(exeDir, "mindfs.exe"))
+	if got != want {
+		t.Fatalf("installedDefaultConfigPathFromExecutable() = %q, want %q", got, want)
 	}
 }
 

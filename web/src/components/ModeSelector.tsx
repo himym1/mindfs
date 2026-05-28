@@ -136,7 +136,11 @@ export function ModeSelector({
                 whiteSpace: "nowrap",
               }}
             >
-              <ModeIcon type={m} size={18} />
+              <ModeIcon
+                type={m}
+                size={18}
+                style={m === "chat" && m !== mode ? { color: "#64748b" } : undefined}
+              />
               <span>{modeLabels[m]}</span>
             </button>
           ))}

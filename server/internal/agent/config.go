@@ -178,7 +178,7 @@ func mergeConfigs(base Config, override Config) Config {
 		RelayBaseURL: base.RelayBaseURL,
 	}
 	if len(override.Shells) > 0 {
-		merged.Shells = append([]Shell(nil), override.Shells...)
+		merged.Shells = mergeShells(base.Shells, override.Shells)
 	}
 	if override.RelayBaseURL != "" {
 		merged.RelayBaseURL = override.RelayBaseURL
@@ -197,6 +197,35 @@ func mergeConfigs(base Config, override Config) Config {
 		merged.Agents = append(merged.Agents, agent)
 	}
 	return merged
+}
+
+func mergeShells(base []Shell, override []Shell) []Shell {
+	if len(override) == 0 {
+		return append([]Shell(nil), base...)
+	}
+	merged := append([]Shell(nil), override...)
+	shellIndexes := make(map[string]int, len(merged))
+	for i, shell := range merged {
+		if key := shellMergeKey(shell); key != "" {
+			shellIndexes[key] = i
+		}
+	}
+	for _, shell := range base {
+		key := shellMergeKey(shell)
+		if key == "" {
+			continue
+		}
+		if _, ok := shellIndexes[key]; ok {
+			continue
+		}
+		shellIndexes[key] = len(merged)
+		merged = append(merged, shell)
+	}
+	return merged
+}
+
+func shellMergeKey(shell Shell) string {
+	return strings.ToLower(strings.TrimSpace(shell.Command))
 }
 
 func parseShellOS(raw interface{}) []string {
@@ -261,14 +290,6 @@ func ResolveConfigPath() (string, error) {
 	if hinted := strings.TrimSpace(os.Getenv(configPathEnvKey)); hinted != "" {
 		return hinted, nil
 	}
-	if shouldPreferWorkingDirConfig() {
-		if cwd, err := os.Getwd(); err == nil {
-			candidate := filepath.Join(cwd, "agents.json")
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				return candidate, nil
-			}
-		}
-	}
 	configDir, err := configpkg.MindFSConfigDir()
 	if err != nil {
 		return "", err
@@ -276,23 +297,21 @@ func ResolveConfigPath() (string, error) {
 	return filepath.Join(configDir, "agents.json"), nil
 }
 
-func shouldPreferWorkingDirConfig() bool {
-	if len(os.Args) == 0 {
-		return false
-	}
-	arg0 := strings.TrimSpace(os.Args[0])
-	if arg0 == "" {
-		return false
-	}
-	return strings.HasPrefix(arg0, "."+string(os.PathSeparator))
-}
-
 func installedDefaultConfigPath() (string, error) {
-	installDir, err := configpkg.MindFSInstallDir()
+	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(installDir, "agents.json"), nil
+	return installedDefaultConfigPathFromExecutable(exe), nil
+}
+
+func installedDefaultConfigPathFromExecutable(exe string) string {
+	exeDir := filepath.Dir(exe)
+	candidate := filepath.Join(exeDir, "agents.json")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		return candidate
+	}
+	return filepath.Join(filepath.Dir(exeDir), "share", "mindfs", "agents.json")
 }
 
 // defaultConfig returns built-in agent definitions.
