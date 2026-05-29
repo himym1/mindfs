@@ -3637,6 +3637,32 @@ export function App({ onGoHome }: AppProps) {
             delete sessionCacheRef.current[cacheKey];
             delete loadedSessionRef.current[cacheKey];
             markSessionStale(rootID, bound.session_key);
+            const synced = await syncSession(rootID, bound.session_key);
+            if (synced.session) {
+              const normalized = {
+                ...(synced.session as any),
+                key: bound.session_key,
+                session_key: bound.session_key,
+                root_id: rootID,
+              } as Session;
+              sessionCacheRef.current[cacheKey] = normalized;
+              loadedSessionRef.current[cacheKey] = true;
+              clearSessionStale(rootID, bound.session_key);
+              setSelectedSession((prev) => {
+                const prevKey = prev?.key || prev?.session_key;
+                const prevRoot =
+                  (prev?.root_id as string | undefined) || currentRootIdRef.current;
+                if (prevKey !== bound.session_key || prevRoot !== rootID) {
+                  return prev;
+                }
+                return toSessionItem(rootID, normalized);
+              });
+              if (boundSessionByRootRef.current[rootID] === bound.session_key) {
+                setDrawerSessionForRoot(rootID, normalized);
+              }
+              bumpCacheVersion();
+              return;
+            }
             await handleSelectSession({
               key: bound.session_key,
               session_key: bound.session_key,
@@ -3645,12 +3671,28 @@ export function App({ onGoHome }: AppProps) {
               agent: agentName,
               name: session.name || session.title || "Pi session",
             } as SessionItem);
+          })
+          .catch((error) => {
+            reportError(
+              "session.sync_failed",
+              String((error as Error)?.message || "同步会话失败"),
+            );
           });
       } finally {
         setImportingExternalSessionKeys(new Set());
       }
     },
-    [exitImportMode, externalImportAgent, handleSelectSession, isMobile, markSessionStale, rootSessionKey],
+    [
+      bumpCacheVersion,
+      clearSessionStale,
+      exitImportMode,
+      externalImportAgent,
+      handleSelectSession,
+      isMobile,
+      markSessionStale,
+      rootSessionKey,
+      setDrawerSessionForRoot,
+    ],
   );
 
 
