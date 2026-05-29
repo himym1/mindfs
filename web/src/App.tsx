@@ -3553,9 +3553,13 @@ export function App({ onGoHome }: AppProps) {
       setSelectedExternalImportKeys(new Set());
       setImportingExternalSessionKeys(new Set());
       setSessionListMode("import");
+      if (isMobile) {
+        setIsLeftOpen(false);
+        setIsRightOpen(true);
+      }
       await loadExternalSessions(rootID, trimmedAgent, { replace: true });
     },
-    [loadExternalSessions],
+    [isMobile, loadExternalSessions],
   );
 
   const enterResumeMode = useCallback(
@@ -3573,13 +3577,17 @@ export function App({ onGoHome }: AppProps) {
       setImportingExternalSessionKeys(new Set());
       setImportMenuOpen(false);
       setSessionListMode("import");
+      if (isMobile) {
+        setIsLeftOpen(false);
+        setIsRightOpen(true);
+      }
       await loadExternalSessions(rootID, "pi", {
         replace: true,
         filterBound: false,
         query: trimmedQuery,
       });
     },
-    [loadExternalSessions],
+    [isMobile, loadExternalSessions],
   );
 
   const handleOpenExternalSession = useCallback(
