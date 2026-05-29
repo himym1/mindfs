@@ -994,7 +994,7 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 	}
 
 	if cleanPath == "service-worker.js" && isRelayedRequest(r) {
-		serveRelayedServiceWorkerKillSwitch(w)
+		serveRelayedServiceWorker(w)
 		return true
 	}
 
@@ -1002,6 +1002,7 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 	info, statErr := os.Stat(assetPath)
 	if statErr == nil && !info.IsDir() {
 		applyStaticCacheHeaders(w, cleanPath)
+		applyStaticContentType(w, cleanPath)
 		if cleanPath == "index.html" {
 			h.serveFrontendIndex(w, r, staticDir, assetPath)
 			return true
@@ -1017,6 +1018,7 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 	if filepath.Ext(cleanPath) != "" {
 		if fallbackPath := fallbackFrontendEntryAsset(staticDir, cleanPath); fallbackPath != "" {
 			applyStaticCacheHeaders(w, fallbackPath)
+			applyStaticContentType(w, fallbackPath)
 			http.ServeFile(w, r, filepath.Join(staticDir, fallbackPath))
 			return true
 		}
@@ -1148,6 +1150,13 @@ func renderFallbackFrontend(content, notice string) string {
 	return out
 }
 
+func applyStaticContentType(w http.ResponseWriter, cleanPath string) {
+	switch cleanPath {
+	case "manifest.webmanifest":
+		w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
+	}
+}
+
 func applyStaticCacheHeaders(w http.ResponseWriter, cleanPath string) {
 	switch cleanPath {
 	case "service-worker.js", "index.html":
@@ -1174,10 +1183,13 @@ func shouldRewriteRelayedStaticAsset(cleanPath string) bool {
 }
 
 func rewriteRelayedFrontendContent(content string) string {
-	return strings.ReplaceAll(content, "./assets/", "./mindfs-assets/")
+	rewritten := strings.ReplaceAll(content, "./assets/", "./mindfs-assets/")
+	rewritten = strings.ReplaceAll(rewritten, `href="/manifest.webmanifest"`, `href="./manifest.webmanifest"`)
+	rewritten = strings.ReplaceAll(rewritten, `href="/apple-touch-icon.png"`, `href="./apple-touch-icon.png"`)
+	return rewritten
 }
 
-const relayedServiceWorkerKillSwitch = `self.addEventListener("install", (event) => {
+const relayedServiceWorkerScript = `self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
 });
 
@@ -1186,7 +1198,6 @@ self.addEventListener("activate", (event) => {
     const keys = await caches.keys();
     await Promise.all(keys.map((key) => caches.delete(key)));
     await self.clients.claim();
-    await self.registration.unregister();
   })());
 });
 
@@ -1195,10 +1206,10 @@ self.addEventListener("fetch", () => {
 });
 `
 
-func serveRelayedServiceWorkerKillSwitch(w http.ResponseWriter) {
+func serveRelayedServiceWorker(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.Write([]byte(relayedServiceWorkerKillSwitch))
+	w.Write([]byte(relayedServiceWorkerScript))
 }
 
 func serveRewrittenStaticAsset(w http.ResponseWriter, r *http.Request, assetPath string) {

@@ -71,6 +71,26 @@ func TestRewriteRelayedFrontendContentKeepsAssetsUnderRelayNode(t *testing.T) {
 	}
 }
 
+func TestRewriteRelayedFrontendContentKeepsInstallManifestUnderRelayNode(t *testing.T) {
+	input := `<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/apple-touch-icon.png">`
+	got := rewriteRelayedFrontendContent(input)
+	if strings.Contains(got, `href="/manifest.webmanifest"`) || strings.Contains(got, `href="/apple-touch-icon.png"`) {
+		t.Fatalf("rewrite left install resources outside relay node scope: %s", got)
+	}
+	if !strings.Contains(got, `href="./manifest.webmanifest"`) || !strings.Contains(got, `href="./apple-touch-icon.png"`) {
+		t.Fatalf("rewrite did not keep install resources relative to relay node: %s", got)
+	}
+}
+
+func TestRelayedServiceWorkerRemainsInstallable(t *testing.T) {
+	if strings.Contains(relayedServiceWorkerScript, "unregister") {
+		t.Fatalf("relayed service worker unregisters itself, breaking PWA installability: %s", relayedServiceWorkerScript)
+	}
+	if !strings.Contains(relayedServiceWorkerScript, `self.addEventListener("fetch"`) {
+		t.Fatalf("relayed service worker must install a fetch listener for PWA installability: %s", relayedServiceWorkerScript)
+	}
+}
+
 func TestFallbackFrontendEntryAssetUsesCurrentIndexReference(t *testing.T) {
 	staticDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(staticDir, "assets"), 0o755); err != nil {
