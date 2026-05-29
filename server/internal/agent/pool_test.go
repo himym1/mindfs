@@ -216,3 +216,47 @@ func TestLoadConfigPrefersAgentsConfigEnv(t *testing.T) {
 		t.Fatalf("expected env-agent from %s", configPathEnvKey)
 	}
 }
+
+func TestShouldResetProcessOnProbeResumeFallback(t *testing.T) {
+	if !shouldResetProcessOnProbeResumeFallback(probePhaseInitial) {
+		t.Fatal("expected initial probe fallback to reset process")
+	}
+	if !shouldResetProcessOnProbeResumeFallback(probePhaseRecovery) {
+		t.Fatal("expected recovery probe fallback to reset process")
+	}
+	if shouldResetProcessOnProbeResumeFallback(probePhaseBackground) {
+		t.Fatal("did not expect background probe fallback to reset process")
+	}
+}
+
+func TestShouldSkipProbeSessionResume(t *testing.T) {
+	if !shouldSkipProbeSessionResume("pi") {
+		t.Fatal("expected pi probe to skip resume")
+	}
+	if !shouldSkipProbeSessionResume(" Pi ") {
+		t.Fatal("expected pi probe skip to trim and ignore case")
+	}
+	if shouldSkipProbeSessionResume("gemini") {
+		t.Fatal("did not expect non-pi probe to skip resume")
+	}
+}
+
+func TestSplitPriorityProbeDefinitionsMovesPiFirst(t *testing.T) {
+	defs := []Definition{{Name: "gemini"}, {Name: "pi"}, {Name: "codex"}}
+	priority, rest := splitPriorityProbeDefinitions(defs)
+	if len(priority) != 1 || priority[0].Name != "pi" {
+		t.Fatalf("priority = %#v, want only pi", priority)
+	}
+	if len(rest) != 2 || rest[0].Name != "gemini" || rest[1].Name != "codex" {
+		t.Fatalf("rest = %#v, want non-pi order preserved", rest)
+	}
+}
+
+func TestShouldProbeBeforeConcurrentBatch(t *testing.T) {
+	if !shouldProbeBeforeConcurrentBatch(" Pi ") {
+		t.Fatal("expected pi to be priority probe")
+	}
+	if shouldProbeBeforeConcurrentBatch("gemini") {
+		t.Fatal("did not expect gemini to be priority probe")
+	}
+}

@@ -494,12 +494,8 @@ func probeInstalledAgentWithPool(ctx context.Context, name string, def Definitio
 
 	sessionKey := fmt.Sprintf("probe-%s", name)
 	defer pool.Close(sessionKey)
-	openCtx := ctx
-	sessionCancel := func() {}
-	if timeout, ok := probeSessionTimeoutForPhase(phase); ok {
-		openCtx, sessionCancel = context.WithTimeout(ctx, timeout)
-	}
-	defer sessionCancel()
+	openCtx, sessionCancel := probeSessionOpenContext(ctx, phase)
+	defer func() { sessionCancel() }()
 	openInput := agenttypes.OpenSessionInput{
 		SessionKey: sessionKey,
 		AgentName:  name,
@@ -509,7 +505,12 @@ func probeInstalledAgentWithPool(ctx context.Context, name string, def Definitio
 	resumedBinding := ProbeSessionBinding{}
 	resumed := false
 	if binding, ok := loadProbeSessionBinding(probeSessions, name); ok {
-		if shouldRotateProbeSession(binding) {
+		if shouldSkipProbeSessionResume(name) {
+			log.Printf("[agent/probe] resume.skip agent=%s phase=%s reason=agent_probe_uses_fresh_session", name, phase)
+			if clearErr := clearProbeSessionBinding(probeSessions, name); clearErr != nil {
+				log.Printf("[agent/probe] resume.skip.clear_failed agent=%s phase=%s err=%v", name, phase, clearErr)
+			}
+		} else if shouldRotateProbeSession(binding) {
 			log.Printf("[agent/probe] rotate agent=%s phase=%s probe_count=%d threshold=%d action=open_new_runtime_session", name, phase, binding.ProbeCount, probeRotateAfterCount)
 			if clearErr := clearProbeSessionBinding(probeSessions, name); clearErr != nil {
 				log.Printf("[agent/probe] rotate.clear_failed agent=%s phase=%s err=%v", name, phase, clearErr)
@@ -535,6 +536,12 @@ func probeInstalledAgentWithPool(ctx context.Context, name string, def Definitio
 		openInput.AgentSessionID = ""
 		resumed = false
 		resumedBinding = ProbeSessionBinding{}
+		sessionCancel()
+		if shouldResetProcessOnProbeResumeFallback(phase) {
+			log.Printf("[agent/probe] resume.reset_process agent=%s phase=%s action=open_new_runtime_session", name, phase)
+			pool.KillAgentProcess(name, 750*time.Millisecond)
+		}
+		openCtx, sessionCancel = probeSessionOpenContext(ctx, phase)
 		sess, err = pool.GetOrCreate(openCtx, openInput)
 	}
 	if err != nil {
@@ -545,8 +552,10 @@ func probeInstalledAgentWithPool(ctx context.Context, name string, def Definitio
 	status.Available = true
 	status.Error = ""
 	status.ProbeError = ""
-	if err := storeProbeSessionBinding(probeSessions, name, sess.SessionID(), resumedBinding, resumed); err != nil {
-		log.Printf("[agent/probe] store_session.error agent=%s phase=%s err=%v", name, phase, err)
+	if !shouldSkipProbeSessionResume(name) {
+		if err := storeProbeSessionBinding(probeSessions, name, sess.SessionID(), resumedBinding, resumed); err != nil {
+			log.Printf("[agent/probe] store_session.error agent=%s phase=%s err=%v", name, phase, err)
+		}
 	}
 	populateProbeModels(ctx, sess, &status)
 	populateProbeCommands(ctx, sess, &status)
@@ -723,6 +732,24 @@ func resolveProbePool(def Definition, shared *Pool) (*Pool, bool) {
 		return shared, false
 	}
 	return NewPool(Config{Agents: []Definition{def}}), true
+}
+
+func shouldSkipProbeSessionResume(agentName string) bool {
+	return strings.EqualFold(strings.TrimSpace(agentName), "pi")
+}
+
+func shouldResetProcessOnProbeResumeFallback(phase probePhase) bool {
+	return phase == probePhaseInitial || phase == probePhaseRecovery
+}
+
+func probeSessionOpenContext(ctx context.Context, phase probePhase) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if timeout, ok := probeSessionTimeoutForPhase(phase); ok {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return ctx, func() {}
 }
 
 func probeSessionTimeoutForPhase(phase probePhase) (time.Duration, bool) {
@@ -910,10 +937,13 @@ func (p *Prober) probeConfiguredAgents(ctx context.Context, defs []Definition) {
 	if len(defs) == 0 {
 		return
 	}
-	p.runDefinitionsConcurrently(defs, func(_ int, def Definition) {
+	probe := func(_ int, def Definition) {
 		status := safeProbeConfiguredAgentWithPool(ctx, def.Name, def, p.pool, p.probeSessions, probePhaseInitial)
 		p.setStatus(status)
-	})
+	}
+	priority, rest := splitPriorityProbeDefinitions(defs)
+	p.runDefinitionsSynchronously(priority, probe)
+	p.runDefinitionsConcurrently(rest, probe)
 }
 
 func (p *Prober) probeInstallOnly(defs []Definition) {
@@ -1007,6 +1037,49 @@ func storeProbeSessionBinding(store *probeSessionStore, agentName, agentSessionI
 		}
 	}
 	return store.PutBinding(agentName, next)
+}
+
+func splitPriorityProbeDefinitions(defs []Definition) ([]Definition, []Definition) {
+	priority := make([]Definition, 0, 1)
+	rest := make([]Definition, 0, len(defs))
+	for _, def := range defs {
+		if shouldProbeBeforeConcurrentBatch(def.Name) {
+			priority = append(priority, def)
+			continue
+		}
+		rest = append(rest, def)
+	}
+	return priority, rest
+}
+
+func shouldProbeBeforeConcurrentBatch(agentName string) bool {
+	return strings.EqualFold(strings.TrimSpace(agentName), "pi")
+}
+
+func (p *Prober) runDefinitionsSynchronously(defs []Definition, fn func(i int, def Definition)) {
+	for i, def := range defs {
+		p.mu.Lock()
+		if _, running := p.inFlight[def.Name]; running {
+			p.mu.Unlock()
+			continue
+		}
+		p.inFlight[def.Name] = struct{}{}
+		p.mu.Unlock()
+
+		func(i int, def Definition) {
+			defer func() {
+				if r := recover(); r != nil {
+					status := unavailableStatus(def.Name, true, fmt.Sprintf("probe panic: %v", r), time.Now().UTC())
+					p.setStatus(status)
+					log.Printf("[agent/probe] worker.panic agent=%s recovered=%v", def.Name, r)
+				}
+				p.mu.Lock()
+				delete(p.inFlight, def.Name)
+				p.mu.Unlock()
+			}()
+			fn(i, def)
+		}(i, def)
+	}
 }
 
 func (p *Prober) runDefinitionsConcurrently(defs []Definition, fn func(i int, def Definition)) {

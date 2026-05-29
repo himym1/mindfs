@@ -9,6 +9,7 @@ type ExternalSessionListProps = {
   importingKeys?: Set<string>;
   selectedImportKeys?: Set<string>;
   filterBound?: boolean;
+  actionMode?: "import" | "open";
   headerAction?: React.ReactNode;
   onBack?: () => void;
   onSelect?: (session: SessionItem) => void;
@@ -29,6 +30,7 @@ export function ExternalSessionList({
   importingKeys,
   selectedImportKeys,
   filterBound = true,
+  actionMode = "import",
   headerAction,
   onBack,
   onSelect,
@@ -41,6 +43,7 @@ export function ExternalSessionList({
   hasMore = false,
 }: ExternalSessionListProps) {
   const selectedCount = selectedImportKeys?.size || 0;
+  const openMode = actionMode === "open";
   const busy = confirmingImport || Boolean(importingKey) || Boolean(importingKeys?.size);
   return (
     <div
@@ -87,9 +90,11 @@ export function ExternalSessionList({
           <div style={emptyStyle}>选择一个 Agent 查看可导入会话</div>
         ) : !sessions.length ? (
           <div style={emptyStyle}>
-            {filterBound
-              ? "没有找到可导入会话，或当前结果都已导入"
-              : "没有找到可导入会话"}
+            {openMode
+              ? "没有找到可恢复会话"
+              : filterBound
+                ? "没有找到可导入会话，或当前结果都已导入"
+                : "没有找到可导入会话"}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
@@ -130,7 +135,7 @@ export function ExternalSessionList({
           </div>
         )}
       </div>
-      {selectedAgent && sessions.length ? (
+      {!openMode && selectedAgent && sessions.length ? (
         <div
           style={{
             flexShrink: 0,

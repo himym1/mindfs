@@ -1,5 +1,24 @@
 import { shouldRegisterServiceWorker } from "./services/runtime";
 
+function isRelayNodePage(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return /^\/n\/[^/]+/.test(window.location.pathname);
+}
+
+function unregisterServiceWorkers(): void {
+  navigator.serviceWorker.getRegistrations()
+    .then((registrations) => {
+      registrations.forEach((registration) => {
+        void registration.unregister();
+      });
+    })
+    .catch((error: unknown) => {
+      console.error("service worker unregister failed", error);
+    });
+}
+
 function deriveServiceWorkerBuildToken(): string {
   if (typeof document === "undefined") {
     return "";
@@ -25,16 +44,8 @@ export function registerServiceWorker(): void {
   if (!("serviceWorker" in navigator)) {
     return;
   }
-  if (!shouldRegisterServiceWorker()) {
-    navigator.serviceWorker.getRegistrations()
-      .then((registrations) => {
-        registrations.forEach((registration) => {
-          void registration.unregister();
-        });
-      })
-      .catch((error: unknown) => {
-        console.error("service worker unregister failed", error);
-      });
+  if (isRelayNodePage() || !shouldRegisterServiceWorker()) {
+    unregisterServiceWorkers();
     return;
   }
   if (import.meta.env.DEV) {

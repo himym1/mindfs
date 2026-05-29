@@ -1,6 +1,15 @@
 {
   "agents": [
     {
+      "name": "pi",
+      "command": "pi-acp",
+      "protocol": "acp",
+      "configBackup": {},
+      "env": {
+        "PI_ACP_EXTRA_PI_ARGS": "--no-extensions"
+      }
+    },
+    {
       "name": "gemini",
       "command": "gemini",
       "protocol": "acp",
@@ -169,12 +178,6 @@
           "OMP_AUTH_BROKER_TOKEN"
         ]
       }
-    },
-    {
-      "name": "pi",
-      "command": "pi-acp",
-      "protocol": "acp",
-      "configBackup": {}
     },
     {
       "name": "hermes",

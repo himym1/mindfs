@@ -15,6 +15,11 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
+const (
+	commandListPollInterval = 50 * time.Millisecond
+	commandListMaxWait      = 5 * time.Second
+)
+
 type OpenOptions struct {
 	AgentName       string
 	SessionKey      string
@@ -315,11 +320,32 @@ func (s *session) ListModes(_ context.Context) (types.ModeList, error) {
 	return mapModeState(s.proc.SessionModeState(s.sessionKey)), nil
 }
 
-func (s *session) ListCommands(_ context.Context) (types.CommandList, error) {
+func (s *session) ListCommands(ctx context.Context) (types.CommandList, error) {
 	if s == nil || s.proc == nil {
 		return types.CommandList{}, errors.New("acp session not initialized")
 	}
-	return mapCommandState(s.proc.SessionCommands(s.sessionKey)), nil
+	if commands := s.proc.SessionCommands(s.sessionKey); len(commands) > 0 {
+		return mapCommandState(commands), nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(commandListMaxWait)
+	defer timer.Stop()
+	ticker := time.NewTicker(commandListPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return mapCommandState(s.proc.SessionCommands(s.sessionKey)), nil
+		case <-timer.C:
+			return mapCommandState(s.proc.SessionCommands(s.sessionKey)), nil
+		case <-ticker.C:
+			if commands := s.proc.SessionCommands(s.sessionKey); len(commands) > 0 {
+				return mapCommandState(commands), nil
+			}
+		}
+	}
 }
 
 func (s *session) CancelCurrentTurn() error {

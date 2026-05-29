@@ -244,7 +244,7 @@ export function ActionBar({
   useEffect(() => {
     if (currentSession || agents.length === 0) return;
     if (agents.some((a) => a.name === agent)) return;
-    const preferred = agents.find((a) => a.available) ?? agents[0];
+    const preferred = agents.find((a) => a.name === "pi") ?? agents.find((a) => a.available) ?? agents[0];
     if (!preferred) {
       return;
     }
@@ -539,7 +539,8 @@ export function ActionBar({
   }, [appendPendingAttachments, currentRootId, sending]);
 
   const resetForNewSession = useCallback(() => {
-    const nextAgent = agents.find((item) => item.name === agent)
+    const nextAgent = agents.find((item) => item.name === "pi")
+      || agents.find((item) => item.name === agent)
       || agents.find((item) => item.available)
       || agents[0];
     if (!nextAgent) {

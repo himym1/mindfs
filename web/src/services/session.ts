@@ -862,6 +862,54 @@ class SessionService {
     }
   }
 
+  async bindExternalSession(
+    rootId: string,
+    agent: string,
+    agentSessionId: string,
+    title?: string,
+  ): Promise<{ session_key: string; agent: string; agent_session_id: string; existing: boolean } | null> {
+    try {
+      return await protectedJSON<{
+        session_key: string;
+        agent: string;
+        agent_session_id: string;
+        existing: boolean;
+      }>(appURL("/api/sessions/bind"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          root_id: rootId,
+          agent,
+          agent_session_id: agentSessionId,
+          title: title || "",
+        }),
+      });
+    } catch (err) {
+      console.error("[Session] Failed to bind external session:", err);
+      return null;
+    }
+  }
+
+
+  async syncExternalSessionFull(
+    rootId: string,
+    sessionKey: string,
+  ): Promise<{ imported_count: number; total_count: number } | null> {
+    try {
+      const params = new URLSearchParams({ root: rootId });
+      return await protectedJSON<{ imported_count: number; total_count: number }>(
+        appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/sync-external`, params),
+        { method: "POST" },
+      );
+    } catch (err) {
+      console.error("[Session] Failed to sync external session history:", err);
+      return null;
+    }
+  }
+
+
   async importExternalSession(
     rootId: string,
     agent: string,

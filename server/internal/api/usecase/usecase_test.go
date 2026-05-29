@@ -19,6 +19,198 @@ import (
 	"mindfs/server/internal/session"
 )
 
+func TestBindExternalSessionCreatesLazySessionWithoutImport(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	importer := &recordingExternalImporter{}
+	service := Service{Registry: &externalBindTestRegistry{root: root, manager: manager, importer: importer}}
+
+	out, err := service.BindExternalSession(ctx, BindExternalSessionInput{
+		RootID:         "mindfs",
+		Agent:          "pi",
+		AgentSessionID: "019e-example",
+		Title:          "Resume Pi work",
+	})
+	if err != nil {
+		t.Fatalf("BindExternalSession returned error: %v", err)
+	}
+	if out.SessionKey == "" {
+		t.Fatalf("SessionKey is empty")
+	}
+	if out.Existing {
+		t.Fatalf("Existing = true, want false for first bind")
+	}
+	if importer.importCalls != 0 {
+		t.Fatalf("ImportExternalSession calls = %d, want 0 for lazy bind", importer.importCalls)
+	}
+
+	created, err := manager.Get(ctx, out.SessionKey, 0)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", out.SessionKey, err)
+	}
+	if _, ok := created.AgentCtxSeq["pi"]; !ok {
+		t.Fatalf("created.AgentCtxSeq missing pi entry: %#v", created.AgentCtxSeq)
+	}
+	if created.Name != "Resume Pi work" {
+		t.Fatalf("created.Name = %q, want Resume Pi work", created.Name)
+	}
+	binding, err := manager.FindAgentBinding(ctx, out.SessionKey, "pi")
+	if err != nil {
+		t.Fatalf("FindAgentBinding: %v", err)
+	}
+	if binding == nil || binding.AgentSessionID != "019e-example" {
+		t.Fatalf("binding = %#v, want agent session id 019e-example", binding)
+	}
+	if len(created.Exchanges) != 1 {
+		t.Fatalf("lazy session exchanges = %d, want 1 resume notice", len(created.Exchanges))
+	}
+	if !strings.Contains(created.Exchanges[0].Content, "快速连接") {
+		t.Fatalf("resume notice = %q, want 快速连接", created.Exchanges[0].Content)
+	}
+}
+
+func TestSyncExternalSessionFullReplacesLazyNotice(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	importer := &recordingExternalImporter{imported: agenttypes.ImportedExternalSession{
+		AgentSessionID: "019e-full",
+		Title:          "Full history",
+		Exchanges: []agenttypes.ImportedExchange{
+			{Role: "user", Content: "hello", Timestamp: time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)},
+			{Role: "agent", Content: "world", Timestamp: time.Date(2026, 5, 1, 10, 0, 1, 0, time.UTC)},
+		},
+	}}
+	service := Service{Registry: &externalBindTestRegistry{root: root, manager: manager, importer: importer}}
+
+	bound, err := service.BindExternalSession(ctx, BindExternalSessionInput{
+		RootID:         "mindfs",
+		Agent:          "pi",
+		AgentSessionID: "019e-full",
+		Title:          "Full history",
+	})
+	if err != nil {
+		t.Fatalf("BindExternalSession returned error: %v", err)
+	}
+
+	out, err := service.SyncExternalSessionFull(ctx, SyncExternalSessionFullInput{
+		RootID: "mindfs",
+		Key:    bound.SessionKey,
+	})
+	if err != nil {
+		t.Fatalf("SyncExternalSessionFull returned error: %v", err)
+	}
+	if out.ImportedCount != 2 {
+		t.Fatalf("ImportedCount = %d, want 2", out.ImportedCount)
+	}
+
+	synced, err := manager.Get(ctx, bound.SessionKey, 0)
+	if err != nil {
+		t.Fatalf("Get synced session: %v", err)
+	}
+	if len(synced.Exchanges) != 2 {
+		t.Fatalf("exchange count = %d, want 2", len(synced.Exchanges))
+	}
+	if synced.Exchanges[0].Content != "hello" || synced.Exchanges[1].Content != "world" {
+		t.Fatalf("synced exchanges = %#v", synced.Exchanges)
+	}
+	if strings.Contains(synced.Exchanges[0].Content, "快速连接") {
+		t.Fatalf("lazy notice was not replaced: %#v", synced.Exchanges[0])
+	}
+	binding, err := manager.FindAgentBinding(ctx, bound.SessionKey, "pi")
+	if err != nil {
+		t.Fatalf("FindAgentBinding: %v", err)
+	}
+	if binding.AgentCtxSeq != 2 {
+		t.Fatalf("AgentCtxSeq = %d, want 2", binding.AgentCtxSeq)
+	}
+}
+
+func TestSyncExternalSessionFullDedupesRepeatedSync(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	importer := &recordingExternalImporter{imported: agenttypes.ImportedExternalSession{
+		AgentSessionID: "019e-dedupe",
+		Title:          "Dedupe history",
+		Exchanges: []agenttypes.ImportedExchange{
+			{Role: "user", Content: "same", Timestamp: time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)},
+		},
+	}}
+	service := Service{Registry: &externalBindTestRegistry{root: root, manager: manager, importer: importer}}
+
+	bound, err := service.BindExternalSession(ctx, BindExternalSessionInput{
+		RootID:         "mindfs",
+		Agent:          "pi",
+		AgentSessionID: "019e-dedupe",
+		Title:          "Dedupe history",
+	})
+	if err != nil {
+		t.Fatalf("BindExternalSession returned error: %v", err)
+	}
+	if _, err := service.SyncExternalSessionFull(ctx, SyncExternalSessionFullInput{RootID: "mindfs", Key: bound.SessionKey}); err != nil {
+		t.Fatalf("first SyncExternalSessionFull returned error: %v", err)
+	}
+	out, err := service.SyncExternalSessionFull(ctx, SyncExternalSessionFullInput{RootID: "mindfs", Key: bound.SessionKey})
+	if err != nil {
+		t.Fatalf("second SyncExternalSessionFull returned error: %v", err)
+	}
+	if out.ImportedCount != 0 {
+		t.Fatalf("second ImportedCount = %d, want 0", out.ImportedCount)
+	}
+	synced, err := manager.Get(ctx, bound.SessionKey, 0)
+	if err != nil {
+		t.Fatalf("Get synced session: %v", err)
+	}
+	if len(synced.Exchanges) != 1 {
+		t.Fatalf("exchange count after repeated sync = %d, want 1", len(synced.Exchanges))
+	}
+}
+
+func TestBindExternalSessionReusesExistingBinding(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	service := Service{Registry: &externalBindTestRegistry{root: root, manager: manager, importer: &recordingExternalImporter{}}}
+
+	first, err := service.BindExternalSession(ctx, BindExternalSessionInput{
+		RootID:         "mindfs",
+		Agent:          "pi",
+		AgentSessionID: "019e-existing",
+		Title:          "Original title",
+	})
+	if err != nil {
+		t.Fatalf("first BindExternalSession returned error: %v", err)
+	}
+	second, err := service.BindExternalSession(ctx, BindExternalSessionInput{
+		RootID:         "mindfs",
+		Agent:          "pi",
+		AgentSessionID: "019e-existing",
+		Title:          "New title should not duplicate",
+	})
+	if err != nil {
+		t.Fatalf("second BindExternalSession returned error: %v", err)
+	}
+	if !second.Existing {
+		t.Fatalf("Existing = false, want true for repeated bind")
+	}
+	if second.SessionKey != first.SessionKey {
+		t.Fatalf("second.SessionKey = %q, want %q", second.SessionKey, first.SessionKey)
+	}
+	items, err := manager.List(ctx, session.ListOptions{})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("session count = %d, want 1", len(items))
+	}
+}
+
 func TestSaveUploadedFilesDefaultsToAttachmentDirAndRenamesConflicts(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
@@ -605,6 +797,89 @@ func selectRunnableAgent(cfg agent.Config) (string, bool) {
 		return name, true
 	}
 	return "", false
+}
+
+type externalBindTestRegistry struct {
+	root     rootfs.RootInfo
+	manager  *session.Manager
+	importer agenttypes.ExternalSessionImporter
+}
+
+func (r *externalBindTestRegistry) GetRoot(rootID string) (rootfs.RootInfo, error) {
+	if rootID != r.root.ID {
+		return rootfs.RootInfo{}, errors.New("root not found")
+	}
+	return r.root, nil
+}
+
+func (r *externalBindTestRegistry) GetSessionManager(string) (*session.Manager, error) {
+	return r.manager, nil
+}
+
+func (*externalBindTestRegistry) UpsertRoot(string) (rootfs.RootInfo, error) {
+	return rootfs.RootInfo{}, nil
+}
+
+func (*externalBindTestRegistry) RemoveRoot(string) (rootfs.RootInfo, error) {
+	return rootfs.RootInfo{}, nil
+}
+
+func (*externalBindTestRegistry) RenameRoot(string, string, string) (rootfs.RootInfo, error) {
+	return rootfs.RootInfo{}, nil
+}
+
+func (*externalBindTestRegistry) ListRoots() []rootfs.RootInfo {
+	return nil
+}
+
+func (*externalBindTestRegistry) GetAgentPool() *agent.Pool {
+	return nil
+}
+
+func (*externalBindTestRegistry) GetPreferences() *preferences.Store {
+	return nil
+}
+
+func (r *externalBindTestRegistry) GetExternalSessionImporter(agentName string) (agenttypes.ExternalSessionImporter, error) {
+	if strings.TrimSpace(agentName) != "pi" {
+		return nil, errors.New("agent not found")
+	}
+	return r.importer, nil
+}
+
+func (*externalBindTestRegistry) GetProber() *agent.Prober {
+	return nil
+}
+
+func (*externalBindTestRegistry) GetCandidateRegistry() *CandidateRegistry {
+	return nil
+}
+
+func (*externalBindTestRegistry) GetFileWatcher(string, *session.Manager) (*rootfs.SharedFileWatcher, error) {
+	return nil, nil
+}
+
+func (*externalBindTestRegistry) ReleaseFileWatcher(string, string) {}
+
+type recordingExternalImporter struct {
+	importCalls int
+	imported    agenttypes.ImportedExternalSession
+}
+
+func (*recordingExternalImporter) AgentName() string {
+	return "pi"
+}
+
+func (*recordingExternalImporter) ListExternalSessions(context.Context, agenttypes.ListExternalSessionsInput) (agenttypes.ListExternalSessionsResult, error) {
+	return agenttypes.ListExternalSessionsResult{}, nil
+}
+
+func (i *recordingExternalImporter) ImportExternalSession(context.Context, agenttypes.ImportExternalSessionInput) (agenttypes.ImportedExternalSession, error) {
+	i.importCalls++
+	if strings.TrimSpace(i.imported.AgentSessionID) != "" || len(i.imported.Exchanges) > 0 {
+		return i.imported, nil
+	}
+	return agenttypes.ImportedExternalSession{}, errors.New("lazy bind should not import")
 }
 
 type uploadTestRegistry struct {

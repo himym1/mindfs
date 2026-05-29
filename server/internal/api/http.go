@@ -260,7 +260,9 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/sessions/search", h.protectedEndpoint(h.handleSessionSearch))
 	r.Get("/api/sessions/external", h.protectedEndpoint(h.handleExternalSessionsList))
 	r.Post("/api/sessions/import", h.protectedEndpoint(h.handleExternalSessionImport))
+	r.Post("/api/sessions/bind", h.protectedEndpoint(h.handleExternalSessionBind))
 	r.Post("/api/sessions/import/batch", h.protectedEndpoint(h.handleExternalSessionImportBatch))
+	r.Post("/api/sessions/{key}/sync-external", h.protectedEndpoint(h.handleSessionSyncExternal))
 	r.Get("/api/sessions/{key}", h.protectedEndpoint(h.handleSessionGet))
 	r.Get("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesGet))
 	r.Post("/api/sessions/{key}/rename", h.protectedEndpoint(h.handleSessionRename))
@@ -515,6 +517,51 @@ func (h *HTTPHandler) handleExternalSessionImport(w http.ResponseWriter, r *http
 	respondJSON(w, http.StatusOK, out)
 }
 
+func (h *HTTPHandler) handleExternalSessionBind(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RootID         string `json:"root_id"`
+		Agent          string `json:"agent"`
+		AgentSessionID string `json:"agent_session_id"`
+		Title          string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid json body"))
+		return
+	}
+	req.RootID = strings.TrimSpace(req.RootID)
+	req.Agent = strings.TrimSpace(req.Agent)
+	req.AgentSessionID = strings.TrimSpace(req.AgentSessionID)
+	req.Title = strings.TrimSpace(req.Title)
+	if req.RootID == "" || req.Agent == "" || req.AgentSessionID == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("root_id, agent, agent_session_id are required"))
+		return
+	}
+	uc := h.service()
+	out, err := uc.BindExternalSession(r.Context(), usecase.BindExternalSessionInput{
+		RootID:         req.RootID,
+		Agent:          req.Agent,
+		AgentSessionID: req.AgentSessionID,
+		Title:          req.Title,
+	})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	if h.AppContext != nil {
+		h.AppContext.GetSessionStreamHub().BroadcastAll(WSResponse{
+			Type: "session.bound",
+			Payload: map[string]any{
+				"root_id":          req.RootID,
+				"session_key":      out.SessionKey,
+				"agent":            out.Agent,
+				"agent_session_id": out.AgentSessionID,
+				"existing":         out.Existing,
+			},
+		})
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
 func (h *HTTPHandler) handleExternalSessionImportBatch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RootID          string   `json:"root_id"`
@@ -557,6 +604,36 @@ func (h *HTTPHandler) handleExternalSessionImportBatch(w http.ResponseWriter, r 
 				},
 			})
 		}
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
+func (h *HTTPHandler) handleSessionSyncExternal(w http.ResponseWriter, r *http.Request) {
+	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
+	key := strings.TrimSpace(chi.URLParam(r, "key"))
+	if key == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session key required"))
+		return
+	}
+	uc := h.service()
+	out, err := uc.SyncExternalSessionFull(r.Context(), usecase.SyncExternalSessionFullInput{
+		RootID: rootID,
+		Key:    key,
+	})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	if h.AppContext != nil {
+		h.AppContext.GetSessionStreamHub().BroadcastAll(WSResponse{
+			Type: "session.sync.updated",
+			Payload: map[string]any{
+				"root_id":        rootID,
+				"session_key":    key,
+				"imported_count": out.ImportedCount,
+				"total_count":    out.TotalCount,
+			},
+		})
 	}
 	respondJSON(w, http.StatusOK, out)
 }
@@ -916,6 +993,11 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 		cleanPath = "index.html"
 	}
 
+	if cleanPath == "service-worker.js" && isRelayedRequest(r) {
+		serveRelayedServiceWorkerKillSwitch(w)
+		return true
+	}
+
 	assetPath := filepath.Join(staticDir, cleanPath)
 	info, statErr := os.Stat(assetPath)
 	if statErr == nil && !info.IsDir() {
@@ -933,6 +1015,11 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 	}
 
 	if filepath.Ext(cleanPath) != "" {
+		if fallbackPath := fallbackFrontendEntryAsset(staticDir, cleanPath); fallbackPath != "" {
+			applyStaticCacheHeaders(w, fallbackPath)
+			http.ServeFile(w, r, filepath.Join(staticDir, fallbackPath))
+			return true
+		}
 		http.NotFound(w, r)
 		return true
 	}
@@ -1008,6 +1095,40 @@ func cleanFrontendResourcePath(raw string) string {
 	return value
 }
 
+func fallbackFrontendEntryAsset(staticDir, cleanPath string) string {
+	if !isFrontendEntryAssetPath(cleanPath) {
+		return ""
+	}
+	indexPath := filepath.Join(staticDir, "index.html")
+	content, err := os.ReadFile(indexPath)
+	if err != nil {
+		return ""
+	}
+	wantExt := filepath.Ext(cleanPath)
+	matches := indexResourceRefPattern.FindAllSubmatch(content, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		candidate := cleanFrontendResourcePath(string(match[1]))
+		if !isFrontendEntryAssetPath(candidate) || filepath.Ext(candidate) != wantExt {
+			continue
+		}
+		info, statErr := os.Stat(filepath.Join(staticDir, candidate))
+		if statErr == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func isFrontendEntryAssetPath(cleanPath string) bool {
+	base := filepath.Base(cleanPath)
+	return strings.HasPrefix(cleanPath, "assets/") &&
+		strings.HasPrefix(base, "index-") &&
+		(filepath.Ext(base) == ".js" || filepath.Ext(base) == ".css")
+}
+
 func frontendAssetMissingNotice(requestPath string) string {
 	cleanPath := pathForStaticAsset(requestPath)
 	if cleanPath == "" {
@@ -1053,7 +1174,31 @@ func shouldRewriteRelayedStaticAsset(cleanPath string) bool {
 }
 
 func rewriteRelayedFrontendContent(content string) string {
-	return strings.ReplaceAll(content, "./assets/", "/mindfs-assets/")
+	return strings.ReplaceAll(content, "./assets/", "./mindfs-assets/")
+}
+
+const relayedServiceWorkerKillSwitch = `self.addEventListener("install", (event) => {
+  event.waitUntil(self.skipWaiting());
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.map((key) => caches.delete(key)));
+    await self.clients.claim();
+    await self.registration.unregister();
+  })());
+});
+
+self.addEventListener("fetch", () => {
+  return;
+});
+`
+
+func serveRelayedServiceWorkerKillSwitch(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Write([]byte(relayedServiceWorkerKillSwitch))
 }
 
 func serveRewrittenStaticAsset(w http.ResponseWriter, r *http.Request, assetPath string) {
@@ -1078,7 +1223,20 @@ func pathForStaticAsset(requestPath string) string {
 	if cleaned == "/" {
 		return ""
 	}
-	return strings.TrimPrefix(cleaned, "/")
+	cleanPath := strings.TrimPrefix(cleaned, "/")
+	cleanPath = stripRelayNodePathPrefix(cleanPath)
+	if strings.HasPrefix(cleanPath, "mindfs-assets/") {
+		cleanPath = "assets/" + strings.TrimPrefix(cleanPath, "mindfs-assets/")
+	}
+	return cleanPath
+}
+
+func stripRelayNodePathPrefix(cleanPath string) string {
+	parts := strings.SplitN(cleanPath, "/", 3)
+	if len(parts) < 3 || parts[0] != "n" || strings.TrimSpace(parts[1]) == "" {
+		return cleanPath
+	}
+	return parts[2]
 }
 
 func (h *HTTPHandler) handleTree(w http.ResponseWriter, r *http.Request) {

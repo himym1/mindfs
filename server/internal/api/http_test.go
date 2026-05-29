@@ -1,6 +1,11 @@
 package api
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestPathForStaticAssetCleansURLPaths(t *testing.T) {
 	tests := []struct {
@@ -23,6 +28,26 @@ func TestPathForStaticAssetCleansURLPaths(t *testing.T) {
 			requestPath: "/",
 			want:        "",
 		},
+		{
+			name:        "relayed asset alias",
+			requestPath: "/mindfs-assets/index.js",
+			want:        "assets/index.js",
+		},
+		{
+			name:        "relay node asset prefix",
+			requestPath: "/n/ZroV4sfU/assets/index.js",
+			want:        "assets/index.js",
+		},
+		{
+			name:        "relay node mindfs asset prefix",
+			requestPath: "/n/ZroV4sfU/mindfs-assets/index.js",
+			want:        "assets/index.js",
+		},
+		{
+			name:        "relay node service worker prefix",
+			requestPath: "/n/ZroV4sfU/service-worker.js",
+			want:        "service-worker.js",
+		},
 	}
 
 	for _, tt := range tests {
@@ -32,5 +57,43 @@ func TestPathForStaticAssetCleansURLPaths(t *testing.T) {
 				t.Fatalf("pathForStaticAsset(%q) = %q, want %q", tt.requestPath, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRewriteRelayedFrontendContentKeepsAssetsUnderRelayNode(t *testing.T) {
+	input := `<script src="./assets/index.js"></script><link href="./assets/index.css">`
+	got := rewriteRelayedFrontendContent(input)
+	if strings.Contains(got, `"/mindfs-assets/`) {
+		t.Fatalf("rewrite used absolute relay asset path: %s", got)
+	}
+	if !strings.Contains(got, `"./mindfs-assets/index.js"`) || !strings.Contains(got, `"./mindfs-assets/index.css"`) {
+		t.Fatalf("rewrite did not keep relative relay asset paths: %s", got)
+	}
+}
+
+func TestFallbackFrontendEntryAssetUsesCurrentIndexReference(t *testing.T) {
+	staticDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(staticDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	index := `<!doctype html><script type="module" src="./assets/index-current.js"></script><link rel="stylesheet" href="./assets/index-current.css">`
+	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "assets", "index-current.js"), []byte("console.log('current')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staticDir, "assets", "index-current.css"), []byte("body{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := fallbackFrontendEntryAsset(staticDir, "assets/index-stale.js"); got != "assets/index-current.js" {
+		t.Fatalf("fallback js = %q, want assets/index-current.js", got)
+	}
+	if got := fallbackFrontendEntryAsset(staticDir, "assets/index-stale.css"); got != "assets/index-current.css" {
+		t.Fatalf("fallback css = %q, want assets/index-current.css", got)
+	}
+	if got := fallbackFrontendEntryAsset(staticDir, "assets/other-stale.js"); got != "" {
+		t.Fatalf("non-entry fallback = %q, want empty", got)
 	}
 }

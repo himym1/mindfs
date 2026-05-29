@@ -245,6 +245,52 @@ function toSessionItem(
     pending: typeof session?.pending === "boolean" ? session.pending : undefined,
   };
 }
+function filterExternalSessionsByQuery(
+  sessions: SessionItem[],
+  query: string,
+  agentSessionId?: string,
+): SessionItem[] {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const normalizedAgentSessionId = String(agentSessionId || "").trim().toLowerCase();
+  if (!normalizedQuery && !normalizedAgentSessionId) {
+    return sessions;
+  }
+  return sessions.filter((session) => {
+    const id = String(session.agent_session_id || session.key || session.session_key || "").trim();
+    if (normalizedAgentSessionId && id.toLowerCase() !== normalizedAgentSessionId) {
+      return false;
+    }
+    if (!normalizedQuery) {
+      return true;
+    }
+    const haystack = [
+      id,
+      session.name || "",
+      session.title || "",
+      session.root_id || "",
+    ].join("\n").toLowerCase();
+    return haystack.includes(normalizedQuery);
+  });
+}
+
+function parseResumeCommand(message: string): { command: "resume" | "continue"; query: string } | null {
+  const text = String(message || "").trim();
+  const match = text.match(/^\/?(resume|continue)(?:\s+(.+))?$/i);
+  if (!match) {
+    return null;
+  }
+  return {
+    command: match[1].toLowerCase() as "resume" | "continue",
+    query: String(match[2] || "").trim(),
+  };
+}
+
+
+function externalSessionIdentifier(session: SessionItem): string {
+  return String(session.agent_session_id || session.key || session.session_key || "").trim();
+}
+
+
 type Exchange = {
   role: string;
   agent?: string;
@@ -1029,6 +1075,7 @@ export function App({ onGoHome }: AppProps) {
   const [sessionListMode, setSessionListMode] = useState<"local" | "import">(
     "local",
   );
+  const [externalSessionAction, setExternalSessionAction] = useState<"import" | "resume">("import");
   const [externalSessions, setExternalSessions] = useState<SessionItem[]>([]);
   const externalSessionsRef = useRef<SessionItem[]>([]);
   const [hasMoreExternalSessions, setHasMoreExternalSessions] = useState(false);
@@ -1037,6 +1084,7 @@ export function App({ onGoHome }: AppProps) {
   const [loadingExternalSessions, setLoadingExternalSessions] = useState(false);
   const [externalSelectedKey, setExternalSelectedKey] = useState("");
   const [externalImportAgent, setExternalImportAgent] = useState("");
+  const [externalSessionQuery, setExternalSessionQuery] = useState("");
   const [externalFilterBound, setExternalFilterBound] = useState(true);
   const [selectedExternalImportKeys, setSelectedExternalImportKeys] = useState<
     Set<string>
@@ -3448,7 +3496,7 @@ export function App({ onGoHome }: AppProps) {
     async (
       rootID: string,
       agent: string,
-      options?: { beforeTime?: string; afterTime?: string; replace?: boolean },
+      options?: { beforeTime?: string; afterTime?: string; replace?: boolean; filterBound?: boolean; query?: string },
     ) => {
       if (!rootID || !agent) {
         setExternalSessions([]);
@@ -3465,16 +3513,17 @@ export function App({ onGoHome }: AppProps) {
           {
             beforeTime: options?.beforeTime,
             afterTime: options?.afterTime,
-            filterBound: externalFilterBound,
+            filterBound: options?.filterBound ?? externalFilterBound,
             limit: 50,
           },
         )) as SessionItem[];
         setHasMoreExternalSessions(next.length >= 50);
+        const filtered = filterExternalSessionsByQuery(next, options?.query || "");
         if (options?.replace || (!options?.beforeTime && !options?.afterTime)) {
-          setExternalSessions(next);
+          setExternalSessions(filtered);
           return;
         }
-        setExternalSessions((prev) => mergeSessionItems(prev, next));
+        setExternalSessions((prev) => mergeSessionItems(prev, filtered));
       } finally {
         setLoadingExternalSessions(false);
       }
@@ -3497,6 +3546,8 @@ export function App({ onGoHome }: AppProps) {
       if (!rootID || !trimmedAgent) {
         return;
       }
+      setExternalSessionAction("import");
+      setExternalSessionQuery("");
       setExternalImportAgent(trimmedAgent);
       setExternalSelectedKey("");
       setSelectedExternalImportKeys(new Set());
@@ -3506,6 +3557,124 @@ export function App({ onGoHome }: AppProps) {
     },
     [loadExternalSessions],
   );
+
+  const enterResumeMode = useCallback(
+    async (query = "") => {
+      const rootID = currentRootIdRef.current || "";
+      const trimmedQuery = String(query || "").trim();
+      if (!rootID) {
+        return;
+      }
+      setExternalSessionAction("resume");
+      setExternalSessionQuery(trimmedQuery);
+      setExternalImportAgent("pi");
+      setExternalSelectedKey("");
+      setSelectedExternalImportKeys(new Set());
+      setImportingExternalSessionKeys(new Set());
+      setImportMenuOpen(false);
+      setSessionListMode("import");
+      await loadExternalSessions(rootID, "pi", {
+        replace: true,
+        filterBound: false,
+        query: trimmedQuery,
+      });
+    },
+    [loadExternalSessions],
+  );
+
+  const handleOpenExternalSession = useCallback(
+    async (session: SessionItem, overrideAgent?: string) => {
+      const rootID = currentRootIdRef.current || "";
+      const agentName = overrideAgent || externalImportAgent || "pi";
+      const agentSessionId = externalSessionIdentifier(session);
+      if (!rootID || !agentName || !agentSessionId) {
+        return;
+      }
+      setExternalSelectedKey(session.key || session.session_key || agentSessionId);
+      setImportingExternalSessionKeys(new Set([agentSessionId]));
+      try {
+        const bound = await sessionService.bindExternalSession(
+          rootID,
+          agentName,
+          agentSessionId,
+          session.name || session.title || "",
+        );
+        if (!bound?.session_key) {
+          reportError("session.bind_failed", "打开会话失败");
+          return;
+        }
+        const next = (await sessionService.fetchSessions(rootID, {})) as SessionItem[];
+        setHasMoreSessions(next.length >= 50);
+        setSessions(next);
+        exitImportMode();
+        await handleSelectSession({
+          key: bound.session_key,
+          session_key: bound.session_key,
+          root_id: rootID,
+          type: "chat",
+          agent: agentName,
+          name: session.name || session.title || "Pi session",
+        } as SessionItem);
+        if (isMobile) {
+          setIsRightOpen(false);
+        }
+        void sessionService
+          .syncExternalSessionFull(rootID, bound.session_key)
+          .then(async (result) => {
+            if (!result) {
+              reportError("session.sync_failed", "同步会话失败");
+              return;
+            }
+            const cacheKey = rootSessionKey(rootID, bound.session_key);
+            delete sessionCacheRef.current[cacheKey];
+            delete loadedSessionRef.current[cacheKey];
+            markSessionStale(rootID, bound.session_key);
+            await handleSelectSession({
+              key: bound.session_key,
+              session_key: bound.session_key,
+              root_id: rootID,
+              type: "chat",
+              agent: agentName,
+              name: session.name || session.title || "Pi session",
+            } as SessionItem);
+          });
+      } finally {
+        setImportingExternalSessionKeys(new Set());
+      }
+    },
+    [exitImportMode, externalImportAgent, handleSelectSession, isMobile, markSessionStale, rootSessionKey],
+  );
+
+
+  const openLatestExternalSession = useCallback(
+    async (agentName = "pi") => {
+      const rootID = currentRootIdRef.current || "";
+      if (!rootID) {
+        return;
+      }
+      setExternalSessionAction("resume");
+      setExternalImportAgent(agentName);
+      setExternalSessionQuery("");
+      setImportingExternalSessionKeys(new Set(["latest"]));
+      try {
+        const next = (await sessionService.fetchExternalSessions(rootID, agentName, {
+          filterBound: false,
+          limit: 1,
+        })) as SessionItem[];
+        const latest = next[0];
+        if (!latest) {
+          setSessionListMode("import");
+          setExternalSessions([]);
+          return;
+        }
+        await handleOpenExternalSession(latest, agentName);
+      } finally {
+        setImportingExternalSessionKeys(new Set());
+      }
+    },
+    [handleOpenExternalSession],
+  );
+
 
   const handleLoadOlderExternalSessions = useCallback(async () => {
     const rootID = currentRootIdRef.current || "";
@@ -3634,6 +3803,15 @@ export function App({ onGoHome }: AppProps) {
     ) => {
       const activeRoot = currentRootIdRef.current;
       if (!activeRoot) return;
+      const slashResume = parseResumeCommand(message);
+      if (slashResume) {
+        if (slashResume.command === "continue") {
+          await openLatestExternalSession("pi");
+        } else {
+          await enterResumeMode(slashResume.query);
+        }
+        return;
+      }
       if (
         Object.values(pendingRequestRef.current).some(
           (pending) => pending.rootId === activeRoot,
@@ -3908,6 +4086,8 @@ export function App({ onGoHome }: AppProps) {
     [
       attachedFileContext,
       rootSessionKey,
+      enterResumeMode,
+      openLatestExternalSession,
       setSelectedPendingByKey,
       bumpCacheVersion,
       setBoundSessionForRoot,
@@ -5626,11 +5806,17 @@ export function App({ onGoHome }: AppProps) {
     const rootID = currentRootIdRef.current || "";
     if (!rootID || !externalImportAgent) return;
     setSelectedExternalImportKeys(new Set());
-    void loadExternalSessions(rootID, externalImportAgent, { replace: true });
+    void loadExternalSessions(rootID, externalImportAgent, {
+      replace: true,
+      filterBound: externalSessionAction === "resume" ? false : externalFilterBound,
+      query: externalSessionAction === "resume" ? externalSessionQuery : "",
+    });
   }, [
     sessionListMode,
     externalImportAgent,
     externalFilterBound,
+    externalSessionAction,
+    externalSessionQuery,
     loadExternalSessions,
   ]);
 
@@ -7988,7 +8174,7 @@ export function App({ onGoHome }: AppProps) {
               color: "var(--text-primary)",
             }}
           >
-            选择要导入会话的 agent
+            {externalSessionAction === "resume" ? "选择要恢复会话的 agent" : "选择要导入会话的 agent"}
           </div>
           <AgentMenuList
             agents={availableAgents}
@@ -8030,19 +8216,24 @@ export function App({ onGoHome }: AppProps) {
         selectedAgent={externalImportAgent}
         importingKeys={importingExternalSessionKeys}
         selectedImportKeys={selectedExternalImportKeys}
-        filterBound={externalFilterBound}
+        filterBound={externalSessionAction === "resume" ? false : externalFilterBound}
+        actionMode={externalSessionAction === "resume" ? "open" : "import"}
         headerAction={sessionImportMenu}
         loading={loadingExternalSessions}
         loadingOlder={loadingOlderExternalSessions}
         confirmingImport={confirmingExternalImport}
         hasMore={hasMoreExternalSessions}
         onBack={exitImportMode}
-        onSelect={(session) =>
+        onSelect={(session) => {
+          if (externalSessionAction === "resume") {
+            void handleOpenExternalSession(session);
+            return;
+          }
           setExternalSelectedKey(
             String(session.key || session.session_key || ""),
-          )
-        }
-        onToggleImport={toggleExternalImportSelection}
+          );
+        }}
+        onToggleImport={externalSessionAction === "resume" ? undefined : toggleExternalImportSelection}
         onConfirmImport={() => {
           void handleConfirmExternalImport();
         }}

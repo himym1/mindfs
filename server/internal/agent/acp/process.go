@@ -195,12 +195,7 @@ func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNoti
 	if session == nil {
 		return nil
 	}
-	handler := session.getOnUpdate()
-	if handler == nil {
-		return nil
-	}
 
-	internalUpdate := wrapSessionUpdate(string(params.SessionId), params.Update)
 	if params.Update.AvailableCommandsUpdate != nil {
 		session.setCommands(params.Update.AvailableCommandsUpdate.AvailableCommands)
 		c.proc.mu.Lock()
@@ -226,13 +221,23 @@ func (c *mindfsClient) SessionUpdate(ctx context.Context, params acp.SessionNoti
 		session.setContextWindow(current)
 	}
 
+	handler := session.getOnUpdate()
+	if handler == nil {
+		return nil
+	}
+
+	internalUpdate := wrapSessionUpdate(string(params.SessionId), params.Update)
 	if internalUpdate.Type != "" {
 		handler(internalUpdate)
-	} else {
+	} else if !isSessionStateOnlyUpdate(params.Update) {
 		raw, _ := json.Marshal(params.Update)
 		log.Printf("[agent/acp] unhandled raw=%s", string(raw))
 	}
 	return nil
+}
+
+func isSessionStateOnlyUpdate(update acp.SessionUpdate) bool {
+	return update.AvailableCommandsUpdate != nil || update.CurrentModeUpdate != nil || update.UsageUpdate != nil
 }
 
 func (c *mindfsClient) RequestPermission(ctx context.Context, params acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
@@ -489,23 +494,20 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 }
 
 func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd string) error {
-	p.mu.Lock()
-	if _, ok := p.sessions[sessionKey]; ok {
-		p.mu.Unlock()
+	trimmedSessionID := acp.SessionId(strings.TrimSpace(sessionID))
+	sess, reserved := p.reserveResumeSession(sessionKey, trimmedSessionID)
+	if !reserved {
 		return nil
 	}
-	p.mu.Unlock()
 
 	resp, err := p.conn.UnstableResumeSession(ctx, acp.UnstableResumeSessionRequest{
 		Cwd:        cwd,
 		McpServers: []acp.McpServer{},
-		SessionId:  acp.SessionId(strings.TrimSpace(sessionID)),
+		SessionId:  trimmedSessionID,
 	})
 	if err != nil {
+		p.rollbackReservedSession(sessionKey, trimmedSessionID, sess)
 		return err
-	}
-	sess := &sessionState{
-		ID: acp.SessionId(strings.TrimSpace(sessionID)),
 	}
 	if resp.Models != nil {
 		modelState := &acp.SessionModelState{
@@ -525,13 +527,13 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 				return items
 			}(),
 		}
-		sess.models = modelState
+		sess.setModels(modelState)
 	}
 	if resp.Modes != nil {
-		sess.modes = resp.Modes
+		sess.setModes(resp.Modes)
 	}
 	p.mu.Lock()
-	if _, ok := p.sessions[sessionKey]; ok {
+	if current := p.sessions[sessionKey]; current != sess {
 		p.mu.Unlock()
 		return nil
 	}
@@ -541,10 +543,31 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	if sess.modes != nil {
 		p.modes = sess.modes
 	}
-	p.sessions[sessionKey] = sess
-	p.sessionsByID[string(sess.ID)] = sess
 	p.mu.Unlock()
 	return nil
+}
+
+func (p *Process) reserveResumeSession(sessionKey string, sessionID acp.SessionId) (*sessionState, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.sessions[sessionKey]; ok {
+		return nil, false
+	}
+	sess := &sessionState{ID: sessionID}
+	p.sessions[sessionKey] = sess
+	p.sessionsByID[string(sessionID)] = sess
+	return sess, true
+}
+
+func (p *Process) rollbackReservedSession(sessionKey string, sessionID acp.SessionId, sess *sessionState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if current := p.sessions[sessionKey]; current == sess {
+		delete(p.sessions, sessionKey)
+	}
+	if current := p.sessionsByID[string(sessionID)]; current == sess {
+		delete(p.sessionsByID, string(sessionID))
+	}
 }
 
 // SetOnUpdate registers a callback for a specific session.

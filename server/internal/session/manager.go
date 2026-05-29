@@ -87,6 +87,11 @@ SELECT 1
 FROM session_agent_bindings
 WHERE agent = ? AND agent_session_id = ?
 LIMIT 1`
+	selectAgentBindingByAgentSessionSQL = `
+SELECT session_key, agent, agent_session_id, agent_ctx_seq
+FROM session_agent_bindings
+WHERE agent = ? AND agent_session_id = ?
+LIMIT 1`
 )
 
 type Manager struct {
@@ -343,6 +348,49 @@ func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, 
 	return nil
 }
 
+func (m *Manager) ReplaceExchangesForAgent(_ context.Context, session *Session, exchanges []Exchange, agent string) error {
+	if session == nil || strings.TrimSpace(session.Key) == "" {
+		return errors.New("session required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, err := m.getSessionUnsafe(session.Key, 0)
+	if err != nil {
+		return err
+	}
+	next := make([]Exchange, 0, len(exchanges))
+	updatedAt := current.UpdatedAt
+	for idx, exchange := range exchanges {
+		exchange.Seq = idx + 1
+		if strings.TrimSpace(exchange.Agent) == "" {
+			exchange.Agent = strings.TrimSpace(agent)
+		}
+		if exchange.Timestamp.IsZero() {
+			exchange.Timestamp = m.now().UTC()
+		} else {
+			exchange.Timestamp = exchange.Timestamp.UTC()
+		}
+		updatedAt = exchange.Timestamp
+		next = append(next, exchange)
+	}
+	if err := m.writeExchanges(current.Key, next); err != nil {
+		return err
+	}
+	current.Exchanges = next
+	current.UpdatedAt = updatedAt
+	if current.AgentCtxSeq == nil {
+		current.AgentCtxSeq = map[string]int{}
+	}
+	if strings.TrimSpace(agent) != "" {
+		current.AgentCtxSeq[strings.TrimSpace(agent)] = len(next)
+	}
+	if err := m.upsertSessionMetaUnsafe(current); err != nil {
+		return err
+	}
+	*session = *current
+	return nil
+}
+
 func (m *Manager) AddExchangeAux(_ context.Context, sessionKey string, aux ExchangeAux) error {
 	if strings.TrimSpace(sessionKey) == "" {
 		return errors.New("session key required")
@@ -498,6 +546,34 @@ func (m *Manager) FindAgentBinding(ctx context.Context, sessionKey, agent string
 		return nil, nil
 	}
 	return binding, err
+}
+
+func (m *Manager) FindBindingByAgentSession(_ context.Context, agent, agentSessionID string) (*AgentBinding, error) {
+	if strings.TrimSpace(agent) == "" {
+		return nil, errors.New("agent required")
+	}
+	if strings.TrimSpace(agentSessionID) == "" {
+		return nil, errors.New("agent session id required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	db, err := m.ensureSessionMetaDBUnsafe()
+	if err != nil {
+		return nil, err
+	}
+	row := db.QueryRow(
+		selectAgentBindingByAgentSessionSQL,
+		strings.TrimSpace(agent),
+		strings.TrimSpace(agentSessionID),
+	)
+	var binding AgentBinding
+	if err := row.Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &binding, nil
 }
 
 func (m *Manager) HasAgentBinding(_ context.Context, agent, agentSessionID string) (bool, error) {
@@ -988,6 +1064,23 @@ func (m *Manager) loadExchanges(key string, afterSeq int) ([]Exchange, int, erro
 		return nil, 0, err
 	}
 	return exchanges, total, nil
+}
+
+func (m *Manager) writeExchanges(key string, exchanges []Exchange) error {
+	path, err := m.exchangePath(key)
+	if err != nil {
+		return err
+	}
+	var builder strings.Builder
+	for _, exchange := range exchanges {
+		payload, err := json.Marshal(exchange)
+		if err != nil {
+			return err
+		}
+		builder.Write(payload)
+		builder.WriteByte('\n')
+	}
+	return m.root.WriteMetaFile(path, []byte(builder.String()))
 }
 
 func (m *Manager) appendExchange(key string, exchange Exchange) error {
