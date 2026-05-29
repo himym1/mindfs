@@ -156,8 +156,37 @@ func (s *session) SendMessage(ctx context.Context, content string) error {
 		return err
 	}
 
+	if err := s.handleStreamedEvents(streamed.Events); err != nil {
+		return err
+	}
+	s.updateThreadIDFromThread()
+	return nil
+}
+
+func (s *session) SubscribeThreadEvents(ctx context.Context) error {
+	if s == nil || s.client == nil {
+		return errors.New("codex session not initialized")
+	}
+	turnCtx, turnID := s.turn.Begin(ctx)
+	defer s.turn.End(turnID)
+	threadID := strings.TrimSpace(s.SessionID())
+	if threadID == "" {
+		s.updateThreadIDFromThread()
+		threadID = strings.TrimSpace(s.SessionID())
+	}
+	if threadID == "" {
+		return errors.New("codex thread id required")
+	}
+	streamed, err := s.client.SubscribeThreadEvents(turnCtx, threadID, s.threadOpts)
+	if err != nil {
+		return err
+	}
+	return s.handleStreamedEvents(streamed.Events)
+}
+
+func (s *session) handleStreamedEvents(events <-chan codexsdk.ThreadEvent) error {
 	textByID := map[string]string{}
-	for event := range streamed.Events {
+	for event := range events {
 		raw, _ := json.Marshal(event)
 		switch e := event.(type) {
 		case *codexsdk.ThreadStartedEvent:
@@ -224,8 +253,6 @@ func (s *session) SendMessage(ctx context.Context, content string) error {
 			logUnhandledEvent(s.sessionKey, "event", raw)
 		}
 	}
-
-	s.updateThreadIDFromThread()
 	return nil
 }
 
@@ -570,13 +597,40 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		}, true
 	case *codexsdk.CollabToolCallItem:
 		status := normalizeStatus(v.Status, started)
+		meta := map[string]any{
+			"rawType":           "collabToolCall",
+			"type":              v.Type,
+			"tool":              v.Tool,
+			"status":            status,
+			"senderThreadId":    v.SenderThreadID,
+			"receiverThreadIds": append([]string(nil), v.ReceiverThreadIDs...),
+			"agentsStates":      v.AgentsStates,
+		}
+		if prompt := stringPtrValue(v.Prompt); prompt != "" {
+			meta["prompt"] = prompt
+		}
+		if model := stringPtrValue(v.Model); model != "" {
+			meta["model"] = model
+		}
+		if effort := stringPtrValue(v.ReasoningEffort); effort != "" {
+			meta["reasoningEffort"] = effort
+		}
+		if v.Arguments != nil {
+			meta["arguments"] = v.Arguments
+		}
+		if v.Result != nil {
+			meta["result"] = v.Result
+		}
+		content := collabToolContent(v)
+		content = append(content, errorContent(v.Error)...)
 		return types.ToolCall{
 			CallID:  v.ID,
-			Title:   firstNonEmpty(v.Tool, "collab_tool"),
+			Title:   collabToolTitle(v),
 			Status:  status,
-			Kind:    types.ToolKindOther,
-			Content: errorContent(v.Error),
+			Kind:    types.ToolKindTask,
+			Content: content,
 			RawType: "collabToolCall",
+			Meta:    meta,
 		}, true
 	default:
 		return types.ToolCall{}, false
@@ -597,6 +651,62 @@ func errorContent(err *codexsdk.McpToolCallError) []types.ToolCallContentItem {
 		return []types.ToolCallContentItem{}
 	}
 	return []types.ToolCallContentItem{{Type: "text", Text: err.Message}}
+}
+
+func collabToolContent(item *codexsdk.CollabToolCallItem) []types.ToolCallContentItem {
+	if item == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(item.Tool), "wait") {
+		return nil
+	}
+	if prompt := stringPtrValue(item.Prompt); prompt != "" {
+		return []types.ToolCallContentItem{{Type: "text", Text: prompt}}
+	}
+	return nil
+}
+
+func collabToolTitle(item *codexsdk.CollabToolCallItem) string {
+	if item == nil {
+		return "collab_tool"
+	}
+	receiver := firstNonEmpty(item.ReceiverThreadIDs...)
+	tool := strings.TrimSpace(item.Tool)
+	switch tool {
+	case "spawnAgent":
+		parts := make([]string, 0, 2)
+		if model := stringPtrValue(item.Model); model != "" {
+			parts = append(parts, model)
+		}
+		if effort := stringPtrValue(item.ReasoningEffort); effort != "" {
+			parts = append(parts, effort)
+		}
+		settings := ""
+		if len(parts) > 0 {
+			settings = " (" + strings.Join(parts, " ") + ")"
+		}
+		prompt := truncateRunes(stringPtrValue(item.Prompt), 80)
+		return strings.TrimSpace("Spawn " + receiver + settings + "  " + prompt)
+	case "wait":
+		return strings.TrimSpace("Waiting for " + receiver)
+	default:
+		return firstNonEmpty(tool, "collab_tool")
+	}
+}
+
+func stringPtrValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if limit <= 0 || len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "..."
 }
 
 func normalizeStatus(status string, started bool) string {

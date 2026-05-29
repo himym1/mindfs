@@ -23,8 +23,10 @@ import (
 	"strings"
 	"time"
 
+	"mindfs/server/internal/agent"
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/api/usecase"
+	"mindfs/server/internal/commandexec"
 	"mindfs/server/internal/e2ee"
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
@@ -322,7 +324,7 @@ func (h *HTTPHandler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := make([]map[string]any, 0, len(out.Sessions))
 	for _, s := range out.Sessions {
-		payload = append(payload, sessionListResponse(s))
+		payload = append(payload, h.sessionListResponse(s))
 	}
 	respondJSON(w, http.StatusOK, payload)
 }
@@ -692,7 +694,7 @@ func (h *HTTPHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		Key:    key,
 		Seq:    afterSeq,
 	})
-	respondJSON(w, http.StatusOK, sessionResponse(out, pendingUser, contextWindow, exchangeAux))
+	respondJSON(w, http.StatusOK, h.sessionResponse(out, pendingUser, contextWindow, exchangeAux))
 }
 
 func (h *HTTPHandler) handleSessionRelatedFilesGet(w http.ResponseWriter, r *http.Request) {
@@ -788,7 +790,7 @@ func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request
 			},
 		})
 	}
-	respondJSON(w, http.StatusOK, sessionListResponse(renamed))
+	respondJSON(w, http.StatusOK, h.sessionListResponse(renamed))
 }
 
 func (h *HTTPHandler) handleSessionDelete(w http.ResponseWriter, r *http.Request) {
@@ -809,7 +811,7 @@ func (h *HTTPHandler) handleSessionDelete(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func sessionResponse(
+func (h *HTTPHandler) sessionResponse(
 	s *session.Session,
 	pendingUser *session.Exchange,
 	contextWindow agenttypes.ContextWindow,
@@ -831,41 +833,84 @@ func sessionResponse(
 		auxPayload[strconv.Itoa(seq)] = append([]session.ExchangeAux(nil), items...)
 	}
 	return map[string]any{
-		"key":            s.Key,
-		"type":           s.Type,
-		"agent":          session.InferAgentFromSession(s),
-		"model":          s.Model,
-		"mode":           session.InferModeFromSession(s),
-		"effort":         session.InferEffortFromSession(s),
-		"fast_service":   session.InferFastServiceFromSession(s),
-		"name":           s.Name,
-		"exchanges":      exchanges,
-		"exchange_aux":   auxPayload,
-		"related_files":  s.RelatedFiles,
-		"context_window": contextWindow,
-		"created_at":     s.CreatedAt,
-		"updated_at":     s.UpdatedAt,
-		"closed_at":      s.ClosedAt,
+		"key":                 s.Key,
+		"type":                s.Type,
+		"parent_session_key":  s.ParentSessionKey,
+		"parent_tool_call_id": s.ParentToolCallID,
+		"agent":               session.InferAgentFromSession(s),
+		"model":               s.Model,
+		"mode":                session.InferModeFromSession(s),
+		"effort":              session.InferEffortFromSession(s),
+		"fast_service":        session.InferFastServiceFromSession(s),
+		"shell":               h.commandShellForResponse(s, exchangeAux),
+		"name":                s.Name,
+		"exchanges":           exchanges,
+		"exchange_aux":        auxPayload,
+		"related_files":       s.RelatedFiles,
+		"context_window":      contextWindow,
+		"created_at":          s.CreatedAt,
+		"updated_at":          s.UpdatedAt,
+		"closed_at":           s.ClosedAt,
 	}
 }
 
-func sessionListResponse(s *session.Session) map[string]any {
+func (h *HTTPHandler) sessionListResponse(s *session.Session) map[string]any {
 	if s == nil {
 		return map[string]any{}
 	}
 	return map[string]any{
-		"key":          s.Key,
-		"type":         s.Type,
-		"agent":        session.InferAgentFromSession(s),
-		"model":        s.Model,
-		"mode":         session.InferModeFromSession(s),
-		"effort":       session.InferEffortFromSession(s),
-		"fast_service": session.InferFastServiceFromSession(s),
-		"name":         s.Name,
-		"created_at":   s.CreatedAt,
-		"updated_at":   s.UpdatedAt,
-		"closed_at":    s.ClosedAt,
+		"key":                 s.Key,
+		"type":                s.Type,
+		"parent_session_key":  s.ParentSessionKey,
+		"parent_tool_call_id": s.ParentToolCallID,
+		"agent":               session.InferAgentFromSession(s),
+		"model":               s.Model,
+		"mode":                session.InferModeFromSession(s),
+		"effort":              session.InferEffortFromSession(s),
+		"fast_service":        session.InferFastServiceFromSession(s),
+		"shell":               h.commandShellForSession(s),
+		"name":                s.Name,
+		"created_at":          s.CreatedAt,
+		"updated_at":          s.UpdatedAt,
+		"closed_at":           s.ClosedAt,
 	}
+}
+
+func (h *HTTPHandler) configuredShells() []commandexec.ShellSpec {
+	if h == nil || h.AppContext == nil || h.AppContext.GetAgentPool() == nil {
+		return nil
+	}
+	cfg := h.AppContext.GetAgentPool().Config()
+	shells := make([]commandexec.ShellSpec, 0, len(cfg.Shells))
+	for _, shell := range cfg.Shells {
+		shells = append(shells, commandexec.ShellSpec{
+			Command:       shell.Command,
+			Args:          append([]string(nil), shell.Args...),
+			LongShellArgs: append([]string(nil), shell.LongShellArgs...),
+			CommandPrefix: shell.CommandPrefix,
+		})
+	}
+	return shells
+}
+
+func (h *HTTPHandler) commandShellForSession(s *session.Session) string {
+	if s == nil || s.Type != session.TypeCommand {
+		return ""
+	}
+	if strings.TrimSpace(s.Shell) != "" {
+		return strings.TrimSpace(s.Shell)
+	}
+	return commandexec.ResolveShell(h.configuredShells())
+}
+
+func (h *HTTPHandler) commandShellForResponse(s *session.Session, aux map[int][]session.ExchangeAux) string {
+	if s == nil || s.Type != session.TypeCommand {
+		return ""
+	}
+	if shell := session.InferCommandShellFromAux(aux); strings.TrimSpace(shell) != "" {
+		return strings.TrimSpace(shell)
+	}
+	return h.commandShellForSession(s)
 }
 
 func externalSessionListResponse(s agenttypes.ExternalSessionSummary) map[string]any {
@@ -892,15 +937,25 @@ func externalSessionListResponse(s agenttypes.ExternalSessionSummary) map[string
 
 func (h *HTTPHandler) handleAgentsList(w http.ResponseWriter, r *http.Request) {
 	if h.AppContext == nil || h.AppContext.GetProber() == nil {
-		log.Printf("[http] agents.list.short_circuit returning_empty_array")
-		respondJSON(w, http.StatusOK, []map[string]any{})
+		log.Printf("[http] agents.list.short_circuit returning_empty_response")
+		respondJSON(w, http.StatusOK, map[string]any{
+			"agents": []map[string]any{},
+			"shells": []map[string]any{},
+		})
 		return
 	}
 	statuses := h.AppContext.GetProber().GetInstalledStatuses()
 	if prefs := h.AppContext.GetPreferences(); prefs != nil {
 		statuses = prefs.ApplyAgentDefaults(statuses)
 	}
-	respondJSON(w, http.StatusOK, statuses)
+	shells := []agent.ShellStatus{}
+	if pool := h.AppContext.GetAgentPool(); pool != nil {
+		shells = pool.AvailableShells()
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"agents": statuses,
+		"shells": shells,
+	})
 }
 
 func (h *HTTPHandler) handleAppUpdateGet(w http.ResponseWriter, r *http.Request) {

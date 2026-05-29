@@ -308,6 +308,21 @@ func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, mode
 	}
 }
 
+func (h *StreamHub) SetPendingReply(rootID, sessionKey, sessionTitle string) {
+	if blank(sessionKey) {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.ensurePendingSessionLocked(sessionKey)
+	delete(h.completed, sessionKey)
+	state.RootID = rootID
+	state.SessionTitle = strings.TrimSpace(sessionTitle)
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now().UTC()
+	}
+}
+
 func (h *StreamHub) GetPendingUserExchange(sessionKey string) *session.Exchange {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -322,6 +337,10 @@ func (h *StreamHub) AppendReplyEvent(sessionKey string, event StreamEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state := h.ensurePendingSessionLocked(sessionKey)
+	if coalesceUserShellStreamEvent(state, event) {
+		state.UpdatedAt = time.Now().UTC()
+		return
+	}
 	state.ReplyingList = append(state.ReplyingList, cloneEvent(event))
 	state.UpdatedAt = time.Now().UTC()
 	if event.Type == "message_chunk" {
@@ -329,6 +348,58 @@ func (h *StreamHub) AppendReplyEvent(sessionKey string, event StreamEvent) {
 			state.Summary = lastRunes(state.Summary+chunk.Content, 50)
 		}
 	}
+}
+
+const maxReplayUserShellStreamBytes = 256 * 1024
+
+func coalesceUserShellStreamEvent(state *SessionPendingState, event StreamEvent) bool {
+	if state == nil || event.Type != string(agenttypes.EventTypeToolUpdate) {
+		return false
+	}
+	next, ok := event.Data.(agenttypes.ToolCall)
+	if !ok || next.Meta == nil || next.Meta["source"] != "userShell" || next.Meta["phase"] != "stream" || next.CallID == "" {
+		return false
+	}
+	for i := len(state.ReplyingList) - 1; i >= 0; i-- {
+		prevEvent := state.ReplyingList[i]
+		if prevEvent.Type != event.Type {
+			continue
+		}
+		prev, ok := prevEvent.Data.(agenttypes.ToolCall)
+		if !ok || prev.CallID != next.CallID || prev.Meta == nil || prev.Meta["source"] != "userShell" || prev.Meta["phase"] != "stream" {
+			continue
+		}
+		merged := prev
+		merged.Status = next.Status
+		merged.Meta = map[string]any{}
+		for key, value := range prev.Meta {
+			merged.Meta[key] = value
+		}
+		for key, value := range next.Meta {
+			merged.Meta[key] = value
+		}
+		text := toolCallText(prev.Content) + toolCallText(next.Content)
+		if len(text) > maxReplayUserShellStreamBytes {
+			text = text[len(text)-maxReplayUserShellStreamBytes:]
+			merged.Meta["replayTruncated"] = true
+			merged.Meta["replayTruncation"] = "tail"
+		}
+		merged.Content = []agenttypes.ToolCallContentItem{{Type: "text", Text: text}}
+		state.ReplyingList[i] = StreamEvent{Type: event.Type, Data: merged}
+		return true
+	}
+	return false
+}
+
+func toolCallText(items []agenttypes.ToolCallContentItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, item := range items {
+		b.WriteString(item.Text)
+	}
+	return b.String()
 }
 
 func (h *StreamHub) ListReplyingSessions() []ReplyingSessionState {

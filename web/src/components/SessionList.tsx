@@ -1,13 +1,17 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AgentIcon } from "./AgentIcon";
+import { ModeIcon } from "./ModeIcon";
 
-export type SessionType = "chat" | "plugin";
+export type SessionType = "chat" | "plugin" | "command";
 
 export type SessionItem = {
   key: string;
   session_key: string;
   type?: SessionType;
+  parent_session_key?: string;
+  parent_tool_call_id?: string;
   agent?: string;
+  shell?: string;
   name?: string;
   created_at?: string;
   updated_at?: string;
@@ -42,10 +46,15 @@ type SessionListProps = {
   hasMore?: boolean;
 };
 
-const typeIcons: Record<SessionType, string> = {
-  chat: "💬",
-  plugin: "🧩",
-};
+function shellBadgeLabel(shell?: string): string {
+  const normalized = String(shell || "").trim().replace(/\\/g, "/");
+  const base = (normalized.split("/").filter(Boolean).pop() || normalized || "sh").toLowerCase();
+  if (base === "powershell.exe") return "ps";
+  if (base === "pwsh.exe") return "pwsh";
+  if (base === "cmd.exe") return "cmd";
+  if (base.endsWith(".exe")) return base.slice(0, -4);
+  return base;
+}
 
 export function SessionList({
   sessions,
@@ -71,6 +80,37 @@ export function SessionList({
 }: SessionListProps) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchBlurTimerRef = useRef<number | null>(null);
+  const visibleSessions = useMemo(() => {
+    if (searchResultsMode) {
+      return sessions;
+    }
+    const childrenByParent = new Map<string, SessionItem[]>();
+    const topLevel: SessionItem[] = [];
+    const keys = new Set(sessions.map((item) => item.key));
+    for (const item of sessions) {
+      const parentKey = String(item.parent_session_key || "").trim();
+      if (parentKey && keys.has(parentKey)) {
+        const children = childrenByParent.get(parentKey) || [];
+        children.push(item);
+        childrenByParent.set(parentKey, children);
+      } else {
+        topLevel.push(item);
+      }
+    }
+    const out: SessionItem[] = [];
+    const append = (item: SessionItem) => {
+      out.push(item);
+      for (const child of childrenByParent.get(item.key) || []) {
+        append(child);
+      }
+    };
+    topLevel.forEach((item) => append(item));
+    return out;
+  }, [searchResultsMode, sessions]);
+  const selectedParentKey = useMemo(() => {
+    if (!selectedKey) return "";
+    return sessions.find((item) => item.key === selectedKey)?.parent_session_key || "";
+  }, [selectedKey, sessions]);
 
   useEffect(() => {
     if (!searchOpen) return;
@@ -294,11 +334,12 @@ export function SessionList({
           ) : null
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-            {sessions.map((session) => (
+            {visibleSessions.map((session) => (
               <SessionCard
                 key={session.key}
                 session={session}
                 selected={session.key === selectedKey}
+                parentHighlighted={!!selectedParentKey && session.key === selectedParentKey}
                 highlightQuery={searchResultsMode ? searchQuery : ""}
                 onSelect={onSelect}
                 onSync={onSync}
@@ -335,6 +376,7 @@ export function SessionList({
 function SessionCard({
   session,
   selected,
+  parentHighlighted,
   highlightQuery,
   onSelect,
   onSync,
@@ -343,6 +385,7 @@ function SessionCard({
 }: {
   session: SessionItem;
   selected: boolean;
+  parentHighlighted?: boolean;
   highlightQuery?: string;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
@@ -350,6 +393,7 @@ function SessionCard({
   onDelete?: (session: SessionItem) => void;
 }) {
   const isClosed = !!session.closed_at;
+  const isSubagent = !!session.parent_session_key;
   const displayName = session.name || `Session ${session.key.slice(0, 8)}`;
   const snippet = (session.search_snippet || "").trim();
   const isSearchResult = !!session.search_match_type;
@@ -357,6 +401,11 @@ function SessionCard({
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(displayName);
   const [saving, setSaving] = useState(false);
+  const rowBackground = selected
+    ? "rgba(59, 130, 246, 0.1)"
+    : parentHighlighted
+      ? "rgba(0,0,0,0.03)"
+      : "transparent";
   const menuRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
@@ -442,24 +491,25 @@ function SessionCard({
         padding: "2px 0",
         borderRadius: "8px",
         position: "relative",
+        paddingLeft: isSubagent ? "10px" : 0,
       }}
     >
       <div
         style={{
           textAlign: "left" as const,
-          padding: "7px 4px 7px 6px",
+          padding: "7px 4px 7px 2px",
           borderRadius: "8px",
           border: "1px solid transparent",
-          background: selected ? "rgba(59, 130, 246, 0.1)" : "transparent",
+          background: rowBackground,
           flex: 1,
           minWidth: 0,
           display: "flex",
           alignItems: "center",
-          gap: "8px",
+          gap: isSubagent ? "3px" : "6px",
           transition: "all 0.15s ease",
         }}
       >
-{!isSearchResult ? (
+        {!isSearchResult ? (
           <span
             style={{
               position: "relative",
@@ -471,30 +521,63 @@ function SessionCard({
               justifyContent: "center",
             }}
           >
-            <span style={{ fontSize: "14px", lineHeight: 1 }}>
-              {typeIcons[session.type || "chat"]}
-            </span>
-            <span
-              style={{
-                position: "absolute",
-                right: "-2px",
-                bottom: "-2px",
-                width: "10px",
-                height: "10px",
-                borderRadius: "999px",
-                background: "var(--content-bg, #fff)",
-                border: "1px solid rgba(255,255,255,0.9)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                overflow: "hidden",
-              }}
-            >
-              <AgentIcon
-                agentName={session.agent || ""}
-                style={{ width: "10px", height: "10px", display: "block" }}
-              />
-            </span>
+            {isSubagent ? (
+              <SubSessionIcon />
+            ) : (
+              <ModeIcon type={session.type || "chat"} size={16} />
+            )}
+            {!isSubagent && session.type === "command" ? (
+              <span
+                title={session.shell || "shell"}
+                style={{
+                  position: "absolute",
+                  right: "-8px",
+                  bottom: "-4px",
+                  minWidth: 0,
+                  maxWidth: "26px",
+                  height: "auto",
+                  padding: "1px 3px",
+                  borderRadius: "5px",
+                  background: "#1d4ed8",
+                  border: "none",
+                  color: "#fff",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontSize: "7px",
+                  fontWeight: 700,
+                  lineHeight: 1.1,
+                  letterSpacing: 0,
+                }}
+              >
+                {shellBadgeLabel(session.shell)}
+              </span>
+            ) : !isSubagent ? (
+              <span
+                style={{
+                  position: "absolute",
+                  right: "-2px",
+                  bottom: "-2px",
+                  width: "10px",
+                  height: "10px",
+                  borderRadius: "999px",
+                  background: "var(--content-bg, #fff)",
+                  border: "1px solid rgba(255,255,255,0.9)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  overflow: "hidden",
+                }}
+              >
+                <AgentIcon
+                  agentName={session.agent || ""}
+                  style={{ width: "10px", height: "10px", display: "block" }}
+                />
+              </span>
+            ) : null}
           </span>
         ) : null}
 
@@ -566,13 +649,13 @@ function SessionCard({
             }}
             onMouseEnter={(e) => {
               const container = e.currentTarget.parentElement;
-              if (container && !selected) {
+              if (container && !selected && !parentHighlighted) {
                 container.style.background = "rgba(0,0,0,0.03)";
               }
             }}
             onMouseLeave={(e) => {
               const container = e.currentTarget.parentElement;
-              if (container && !selected) {
+              if (container && !selected && !parentHighlighted) {
                 container.style.background = "transparent";
               }
             }}
@@ -919,6 +1002,25 @@ function ChevronLeftIcon() {
       aria-hidden="true"
     >
       <path d="m15 18-6-6 6-6" />
+    </svg>
+  );
+}
+
+function SubSessionIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 32 32"
+      aria-hidden="true"
+      style={{ color: "var(--accent-color)", display: "block" }}
+    >
+      <path d="M0 0h32v32H0z" fill="none" />
+      <path
+        fill="currentColor"
+        d="M23 20c-2.41 0-4.43 1.72-4.9 4H14c-2.21 0-4-1.79-4-4v-8.1A5 5 0 1 0 4 7c0 2.41 1.72 4.43 4 4.9V20c0 3.31 2.69 6 6 6h4.1a5 5 0 1 0 4.9-6M6 7c0-1.65 1.35-3 3-3s3 1.35 3 3s-1.35 3-3 3s-3-1.35-3-3"
+      />
     </svg>
   );
 }

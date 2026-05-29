@@ -1,4 +1,58 @@
 {
+  "shells": [
+    {
+      "command": "zsh",
+      "args": ["-ic"],
+      "longShellArgs": [],
+      "os": ["darwin", "linux"]
+    },
+    {
+      "command": "bash",
+      "args": ["-ic"],
+      "longShellArgs": [],
+      "os": ["darwin", "linux"]
+    },
+    {
+      "command": "sh",
+      "args": ["-lc"],
+      "longShellArgs": [],
+      "os": ["darwin", "linux"]
+    },
+    {
+      "command": "pwsh",
+      "args": ["-NoLogo", "-NoProfile", "-Command"],
+      "longShellArgs": ["-NoLogo", "-NoProfile"],
+      "commandPrefix": "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [Console]::OutputEncoding; $OutputEncoding = [Console]::OutputEncoding;",
+      "os": "windows"
+    },
+    {
+      "name": "ps",
+      "command": "powershell.exe",
+      "args": ["-NoLogo", "-NoProfile", "-Command"],
+      "longShellArgs": ["-NoLogo", "-NoProfile"],
+      "commandPrefix": "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::InputEncoding = [Console]::OutputEncoding; $OutputEncoding = [Console]::OutputEncoding;",
+      "os": "windows"
+    },
+    {
+      "command": "bash.exe",
+      "args": ["-lc"],
+      "longShellArgs": [],
+      "os": "windows"
+    },
+    {
+      "command": "wsl.exe",
+      "args": ["--exec", "bash", "-lc"],
+      "longShellArgs": ["--exec", "bash"],
+      "os": "windows"
+    },
+    {
+      "command": "cmd.exe",
+      "args": ["/D", "/S", "/C"],
+      "longShellArgs": ["/Q", "/K"],
+      "commandPrefix": "chcp 65001 >NUL &",
+      "os": "windows"
+    }
+  ],
   "agents": [
     {
       "name": "pi",

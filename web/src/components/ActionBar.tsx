@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { type SessionMode } from "./ModeSelector";
 import { ModeSelector } from "./ModeSelector";
 import { AgentSelector } from "./AgentSelector";
-import { fetchAgents, type AgentStatus } from "../services/agents";
+import { fetchAgents, fetchShells, type AgentStatus, type ShellStatus } from "../services/agents";
 import { fetchCandidates, type CandidateItem } from "../services/candidates";
 import { reportError } from "../services/error";
 import { uploadFiles } from "../services/upload";
@@ -14,9 +14,10 @@ type SessionInfo = {
   key: string;
   session_key?: string;
   name: string;
-  type: "chat" | "plugin";
+  type: "chat" | "plugin" | "command";
   agent: string;
   model?: string;
+  shell?: string;
   mode?: string;
   effort?: string;
   fast_service?: string;
@@ -64,6 +65,7 @@ type ActionBarProps = {
     agentMode?: string,
     effort?: string,
     fastService?: "" | "on" | "off",
+    shell?: string,
   ) => void | Promise<void>;
   onCancelCurrentTurn?: (sessionKey: string) => void;
   onNewSession?: () => void;
@@ -77,6 +79,7 @@ type ActionBarProps = {
 const modePlaceholders: Record<SessionMode, string> = {
   chat: "给 agent 发消息...",
   plugin: "描述要生成的视图插件...",
+  command: "输入命令...",
 };
 
 const chatBlurPlaceholders = [
@@ -86,6 +89,7 @@ const chatBlurPlaceholders = [
 
 const MOBILE_BREAKPOINT = 768;
 const IME_ENTER_GUARD_MS = 120;
+const CANDIDATE_FETCH_DEBOUNCE_MS = 512;
 
 function getAgentDefaults(agent?: AgentStatus | null) {
   return {
@@ -111,6 +115,149 @@ function buildPendingAttachment(file: File): PendingAttachment {
     isImage,
     previewUrl: isImage ? URL.createObjectURL(normalizedFile) : undefined,
   };
+}
+
+function ShellSelector({
+  shell,
+  shells,
+  onShellChange,
+  compact = false,
+}: {
+  shell: string;
+  shells: ShellStatus[];
+  onShellChange: (shell: string) => void;
+  compact?: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const selected = shells.find((item) => item.id === shell || item.command === shell || item.resolved_command === shell) || shells.find((item) => item.default) || shells[0];
+
+  useEffect(() => {
+    const handlePointerOutside = (event: PointerEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    if (isOpen) {
+      document.addEventListener("pointerdown", handlePointerOutside);
+      return () => document.removeEventListener("pointerdown", handlePointerOutside);
+    }
+  }, [isOpen]);
+
+  return (
+    <div ref={dropdownRef} style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => shells.length > 0 && setIsOpen((prev) => !prev)}
+        disabled={shells.length === 0}
+        title="Shell"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          maxWidth: compact ? "72px" : "92px",
+          height: compact ? "24px" : "28px",
+          border: "none",
+          borderRadius: "8px",
+          background: "transparent",
+          color: "inherit",
+          fontSize: "11px",
+          fontWeight: 700,
+          lineHeight: 1,
+          padding: "0 3px",
+          outline: "none",
+          cursor: shells.length === 0 ? "default" : "pointer",
+          opacity: shells.length === 0 ? 0.45 : 1,
+        }}
+      >
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            display: "inline-block",
+            maxWidth: "100%",
+            padding: "1px 4px",
+            borderRadius: "6px",
+            background: "#1d4ed8",
+            color: "#fff",
+            lineHeight: 1.2,
+            boxSizing: "border-box",
+          }}
+        >
+          {selected?.label || "shell"}
+        </span>
+      </button>
+
+      {isOpen && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "calc(100% + 8px)",
+            right: 0,
+            background: "var(--menu-bg)",
+            border: "1px solid var(--menu-border)",
+            borderRadius: "12px",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
+            zIndex: 1000,
+            width: "max-content",
+            minWidth: "104px",
+            maxWidth: "min(72vw, 180px)",
+            padding: "8px 0",
+          }}
+        >
+          <div
+            style={{
+              padding: "6px 12px",
+              fontSize: "11px",
+              fontWeight: 600,
+              color: "var(--text-secondary)",
+              textTransform: "uppercase",
+            }}
+          >
+            Shell
+          </div>
+          {shells.map((item) => {
+            const isSelected = item.id === selected?.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  onShellChange(item.id);
+                  setIsOpen(false);
+                }}
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "9px 12px",
+                  border: "none",
+                  background: isSelected ? "rgba(59, 130, 246, 0.08)" : "transparent",
+                  color: isSelected ? "var(--accent-color)" : "var(--text-primary)",
+                  fontSize: "13px",
+                  fontWeight: isSelected ? 700 : 500,
+                  textAlign: "left",
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+                onMouseEnter={(event) => {
+                  if (!isSelected) {
+                    event.currentTarget.style.background = "rgba(0,0,0,0.04)";
+                  }
+                }}
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.background = isSelected ? "rgba(59, 130, 246, 0.08)" : "transparent";
+                }}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function useResponsive() {
@@ -139,6 +286,18 @@ function candidateNameColor(candidateType: CandidateItem["type"], isDark: boolea
   }
 }
 
+function replaceActiveTokenText(input: string, activeToken: { type: "file" | "slash" | "prompt" | "command"; query: string } | null, value: string): string {
+  if (!activeToken) return input;
+  const trigger = activeToken.type === "file" ? "@" : activeToken.type === "prompt" ? "#" : activeToken.type === "slash" ? "/" : "";
+  if (!trigger) return value;
+  const needle = `${trigger}${activeToken.query}`;
+  const index = input.lastIndexOf(needle);
+  if (index < 0) {
+    return `${input}${value} `;
+  }
+  return `${input.slice(0, index)}${value} ${input.slice(index + needle.length)}`;
+}
+
 export function ActionBar({
   status = "Disconnected",
   agentsVersion = 0,
@@ -165,8 +324,10 @@ export function ActionBar({
   const [effort, setEffort] = useState("");
   const [fastService, setFastService] = useState<"" | "on" | "off">("");
   const [agents, setAgents] = useState<AgentStatus[]>([]);
+  const [shells, setShells] = useState<ShellStatus[]>([]);
+  const [shell, setShell] = useState("");
   const [serializedInput, setSerializedInput] = useState("");
-  const [activeToken, setActiveToken] = useState<{ type: "file" | "slash" | "prompt"; query: string } | null>(null);
+  const [activeToken, setActiveToken] = useState<{ type: "file" | "slash" | "prompt" | "command"; query: string } | null>(null);
   const [dragX, setDragX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [sending, setSending] = useState(false);
@@ -185,6 +346,7 @@ export function ActionBar({
   const editorRef = useRef<TokenEditorHandle>(null);
   const candidateAbortRef = useRef<AbortController | null>(null);
   const candidateItemRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const suppressedCommandCandidateTextRef = useRef("");
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const compositionGuardUntilRef = useRef(0);
@@ -210,13 +372,14 @@ export function ActionBar({
       syncedSessionSignatureRef.current = "";
       return;
     }
-    const nextMode = currentSession.type === "plugin" ? "plugin" : "chat";
+    const nextMode = currentSession.type === "plugin" ? "plugin" : currentSession.type === "command" ? "command" : "chat";
     const nextAgent = currentSession.agent || "";
     const nextModel = currentSession.model || "";
+    const nextShell = currentSession.shell || "";
     const nextAgentMode = currentSession.mode || "";
     const nextEffort = currentSession.effort || "";
     const nextFastService = (currentSession.fast_service || "") as "" | "on" | "off";
-    const signature = `${sessionKey || ""}::${nextMode}::${nextAgent}::${nextModel}::${nextAgentMode}::${nextEffort}::${nextFastService}`;
+    const signature = `${sessionKey || ""}::${nextMode}::${nextAgent}::${nextModel}::${nextShell}::${nextAgentMode}::${nextEffort}::${nextFastService}`;
     if (syncedSessionSignatureRef.current === signature) {
       return;
     }
@@ -224,6 +387,7 @@ export function ActionBar({
     setMode(nextMode);
     setAgent(nextAgent);
     setModel(nextModel);
+    setShell(nextShell);
     setAgentMode(nextAgentMode);
     setEffort(nextEffort);
     setFastService(nextFastService);
@@ -236,10 +400,24 @@ export function ActionBar({
   }, [currentSession?.pending]);
 
   useEffect(() => {
-    fetchAgents(true)
-      .then(setAgents)
+    Promise.all([fetchAgents(true), fetchShells(true)])
+      .then(([nextAgents, nextShells]) => {
+        setAgents(nextAgents);
+        setShells(nextShells);
+      })
       .catch((err) => console.error("Failed to fetch agents:", err));
   }, [agentsVersion]);
+
+  useEffect(() => {
+    if (mode !== "command" || shells.length === 0) {
+      return;
+    }
+    if (shells.some((item) => item.id === shell || item.command === shell || item.resolved_command === shell)) {
+      return;
+    }
+    const preferred = shells.find((item) => item.default) || shells[0];
+    setShell(preferred?.id || "");
+  }, [mode, shell, shells]);
 
   useEffect(() => {
     if (currentSession || agents.length === 0) return;
@@ -306,6 +484,18 @@ export function ActionBar({
   useEffect(() => () => candidateAbortRef.current?.abort(), []);
 
   useEffect(() => {
+    if (mode !== "command") {
+      return;
+    }
+    if (!isFocused) {
+      candidateAbortRef.current?.abort();
+      setActiveToken(null);
+      setCandidates([]);
+      setActiveCandidateIndex(0);
+    }
+  }, [mode, isFocused]);
+
+  useEffect(() => {
     return () => {
       pendingAttachments.forEach((attachment) => {
         if (attachment.previewUrl) {
@@ -316,7 +506,7 @@ export function ActionBar({
   }, []);
 
   useEffect(() => {
-    if (!activeToken || !currentRootId || (activeToken.type === "slash" && !agent)) {
+    if (!activeToken || !currentRootId || (activeToken.type === "slash" && mode !== "command" && !agent)) {
       candidateAbortRef.current?.abort();
       setCandidates([]);
       setActiveCandidateIndex(0);
@@ -325,29 +515,46 @@ export function ActionBar({
     const controller = new AbortController();
     candidateAbortRef.current?.abort();
     candidateAbortRef.current = controller;
-    fetchCandidates({
-      rootId: currentRootId,
-      type: activeToken.type === "file" ? "file" : activeToken.type === "prompt" ? "prompt" : "skill",
-      query: activeToken.query,
-      agent: activeToken.type === "slash" ? agent : undefined,
-      signal: controller.signal,
-    })
-      .then((items) => {
-        setCandidates(items);
-        setActiveCandidateIndex(0);
+    const timer = window.setTimeout(() => {
+      fetchCandidates({
+        rootId: currentRootId,
+        type: activeToken.type === "file"
+          ? "file"
+          : activeToken.type === "prompt"
+            ? "prompt"
+            : activeToken.type === "command" || mode === "command"
+              ? "command"
+              : "skill",
+        query: activeToken.query,
+        agent: activeToken.type === "slash" && mode !== "command" ? agent : undefined,
+        signal: controller.signal,
       })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        console.error("Failed to fetch candidates:", err);
-        setCandidates([]);
-        setActiveCandidateIndex(0);
-      });
-    return () => controller.abort();
-  }, [activeToken, currentRootId, agent]);
+        .then((items) => {
+          const nextItems = activeToken.type === "command"
+            ? items.filter((item) => item.name.trim() !== activeToken.query.trim())
+            : items;
+          setCandidates(nextItems);
+          setActiveCandidateIndex(activeToken.type === "command" ? -1 : 0);
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          console.error("Failed to fetch candidates:", err);
+          setCandidates([]);
+          setActiveCandidateIndex(0);
+        });
+    }, CANDIDATE_FETCH_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [activeToken, currentRootId, agent, mode]);
 
   useEffect(() => {
     if (candidates.length === 0) {
       candidateItemRefs.current = [];
+      return;
+    }
+    if (activeCandidateIndex < 0) {
       return;
     }
     const activeItem = candidateItemRefs.current[activeCandidateIndex];
@@ -372,30 +579,60 @@ export function ActionBar({
   const handleEditorChange = useCallback((payload: {
     serializedText: string;
     displayText: string;
-    activeToken: { type: "file" | "slash" | "prompt"; query: string } | null;
+    activeToken: { type: "file" | "slash" | "prompt" | "command"; query: string } | null;
   }) => {
     setSerializedInput(payload.serializedText);
-    setActiveToken(payload.activeToken);
+    if (mode === "command") {
+      const query = payload.displayText.trim();
+      if (!query) {
+        suppressedCommandCandidateTextRef.current = "";
+        setActiveToken(null);
+      } else if (payload.activeToken) {
+        suppressedCommandCandidateTextRef.current = "";
+        setActiveToken(payload.activeToken);
+      } else if (query === suppressedCommandCandidateTextRef.current) {
+        setActiveToken(null);
+      } else {
+        suppressedCommandCandidateTextRef.current = "";
+        setActiveToken({ type: "command", query });
+      }
+    } else {
+      suppressedCommandCandidateTextRef.current = "";
+      setActiveToken(payload.activeToken);
+    }
     if (payload.displayText.trim().length === 0) {
       setIsMultiLine(false);
       return;
     }
     requestAnimationFrame(syncEditorHeight);
-  }, [syncEditorHeight]);
+  }, [mode, syncEditorHeight]);
 
   const applyCandidate = useCallback((candidate: CandidateItem) => {
     if (!activeToken) return;
     setCandidates([]);
     setActiveCandidateIndex(0);
-    editorRef.current?.insertCandidate(candidate.type, candidate.name);
+    if (candidate.type === "command") {
+      suppressedCommandCandidateTextRef.current = candidate.name.trim();
+      editorRef.current?.setText(candidate.name);
+    } else if (mode === "command" && candidate.type === "file") {
+      suppressedCommandCandidateTextRef.current = "";
+      const nextText = replaceActiveTokenText(serializedInput, activeToken, candidate.name);
+      editorRef.current?.setText(nextText);
+      setSerializedInput(nextText);
+    } else {
+      suppressedCommandCandidateTextRef.current = "";
+      editorRef.current?.insertCandidate(candidate.type, candidate.name);
+    }
     editorRef.current?.focus();
     syncEditorHeight();
-  }, [activeToken, syncEditorHeight]);
+  }, [activeToken, mode, serializedInput, syncEditorHeight]);
 
   const handleSend = useCallback(async () => {
     const messageText = serializedInput.trim();
-    if ((!messageText && pendingAttachments.length === 0) || !isConnected || sending || !agent) return;
+    if ((!messageText && pendingAttachments.length === 0) || !isConnected || sending || (mode !== "command" && !agent)) return;
     setSending(true);
+    setCandidates([]);
+    setActiveCandidateIndex(0);
     try {
       let attachmentTokens = "";
       if (pendingAttachments.length > 0) {
@@ -418,11 +655,12 @@ export function ActionBar({
       await onSendMessage?.(
         payload,
         mode,
-        agent,
+        mode === "command" ? "" : agent,
         model || undefined,
         agentMode || undefined,
         supportsEffort ? effort || undefined : undefined,
         supportsServiceTier ? fastService : undefined,
+        mode === "command" ? shell || undefined : undefined,
       );
       editorRef.current?.clear();
       setSerializedInput("");
@@ -477,17 +715,19 @@ export function ActionBar({
     if (candidates.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setActiveCandidateIndex((prev) => (prev + 1) % candidates.length);
+        setActiveCandidateIndex((prev) => (prev < 0 ? 0 : (prev + 1) % candidates.length));
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setActiveCandidateIndex((prev) => (prev - 1 + candidates.length) % candidates.length);
+        setActiveCandidateIndex((prev) => (prev < 0 ? candidates.length - 1 : (prev - 1 + candidates.length) % candidates.length));
         return;
       }
       if (e.key === "Tab") {
         e.preventDefault();
-        applyCandidate(candidates[activeCandidateIndex] || candidates[0]);
+        if (activeCandidateIndex >= 0) {
+          applyCandidate(candidates[activeCandidateIndex]);
+        }
         return;
       }
       if (e.key === "Escape") {
@@ -508,10 +748,18 @@ export function ActionBar({
       return false;
     }
     if (candidates.length > 0) {
-      event?.preventDefault();
-      event?.stopPropagation();
-      applyCandidate(candidates[activeCandidateIndex] || candidates[0]);
-      return true;
+      if (activeCandidateIndex >= 0) {
+        event?.preventDefault();
+        event?.stopPropagation();
+        applyCandidate(candidates[activeCandidateIndex]);
+        return true;
+      }
+      if (mode !== "command") {
+        event?.preventDefault();
+        event?.stopPropagation();
+        applyCandidate(candidates[0]);
+        return true;
+      }
     }
     if (!isMobile || (mobileEnterKeySends && mode === "chat")) {
       event?.preventDefault();
@@ -590,7 +838,7 @@ export function ActionBar({
   }, [isDragging, handleDragEnd]);
 
   const isSelectedAgentUnavailable = agents.length > 0 ? agents.find((a) => a.name === agent)?.available === false : false;
-  const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && !!agent;
+  const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && (mode === "command" || !!agent);
   const hasBoundSession = !!currentSession;
   const showCancel = !!currentSession?.pending && !!currentSession?.key;
   const isModeLocked = !!currentSession;
@@ -615,7 +863,7 @@ export function ActionBar({
     : mode === "chat" && !isFocused
       ? blurPlaceholder
       : modePlaceholders[mode];
-  const editorRightInset = isMultiLine ? 14 : isMobile ? 124 : 148;
+  const editorRightInset = isMultiLine ? 14 : mode === "command" ? (isMobile ? 92 : 116) : isMobile ? 124 : 148;
   const editorBottomInset = isMultiLine ? 44 : 12;
   const editorMinHeight = 44;
 
@@ -672,6 +920,9 @@ export function ActionBar({
                   );
                 }
                 if (focused) {
+                  if (mode === "command" && serializedInput.trim()) {
+                    setActiveToken({ type: "command", query: serializedInput.trim() });
+                  }
                   onRequestFileContext?.();
                 }
               }}
@@ -718,7 +969,7 @@ export function ActionBar({
                       lineHeight: 1.5,
                     }}
                   >
-                    收藏用户消息后，可快速插入提示词
+                    {activeToken.type === "command" ? "暂无命令历史，成功执行后会出现在这里" : "收藏用户消息后，可快速插入提示词"}
                   </div>
                 ) : (
                   candidates.map((candidate, index) => (
@@ -735,11 +986,11 @@ export function ActionBar({
                       aria-selected={index === activeCandidateIndex}
                       style={{
                         display: "flex",
-                        flexDirection: "column",
-                        alignItems: "flex-start",
-                        gap: "2px",
+                        flexDirection: candidate.type === "command" ? "row" : "column",
+                        alignItems: candidate.type === "command" ? "center" : "flex-start",
+                        gap: candidate.type === "command" ? "0" : "2px",
                         width: "100%",
-                        padding: "10px 12px",
+                        padding: candidate.type === "command" ? "8px 12px" : "10px 12px",
                         border: "none",
                         borderTop: index === 0 ? "none" : "1px solid var(--menu-divider)",
                         background: index === activeCandidateIndex ? "var(--menu-active-bg)" : "transparent",
@@ -748,10 +999,18 @@ export function ActionBar({
                         textAlign: "left",
                       }}
                     >
-                      <span style={{ fontSize: "13px", fontWeight: 500, color: candidateNameColor(candidate.type, isDark) }}>
-                        {candidate.type === "file" ? `@${candidate.name}` : candidate.type === "prompt" ? `#${candidate.name}` : `/${candidate.name}`}
+                      <span style={{
+                        fontSize: "13px",
+                        fontWeight: 500,
+                        color: candidateNameColor(candidate.type, isDark),
+                        minWidth: 0,
+                        overflow: candidate.type === "command" ? "hidden" : "visible",
+                        textOverflow: candidate.type === "command" ? "ellipsis" : "clip",
+                        whiteSpace: candidate.type === "command" ? "nowrap" : "normal",
+                      }}>
+                        {candidate.type === "file" ? (mode === "command" ? candidate.name : `@${candidate.name}`) : candidate.type === "prompt" ? `#${candidate.name}` : candidate.type === "command" ? candidate.name : `/${candidate.name}`}
                       </span>
-                      {candidate.description ? (
+                      {candidate.type !== "command" && candidate.description ? (
                         <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>{candidate.description}</span>
                       ) : null}
                     </div>
@@ -839,28 +1098,37 @@ export function ActionBar({
               </div>
 
               <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} />
-              <AgentSelector
-                agent={agent}
-                model={model}
-                mode={agentMode}
-                effort={effort}
-                agents={agents}
-                onAgentChange={(nextAgent, nextModel) => {
-                  const nextStatus = agents.find((item) => item.name === nextAgent);
-                  const defaults = getAgentDefaults(nextStatus);
-                  setAgent(nextAgent);
-                  setModel(nextModel || defaults.model);
-                  setAgentMode("");
-                  setEffort(defaults.effort);
-                  setFastService(defaults.fastService);
-                }}
-                onModeChange={(nextAgentMode) => setAgentMode(nextAgentMode || "")}
-                onEffortChange={(nextEffort) => setEffort(nextEffort || "")}
-                fastService={fastService}
-                onFastServiceChange={(nextFastService) => setFastService(nextFastService || "")}
-                compact={true}
-                warnUnavailable={isSelectedAgentUnavailable}
-              />
+              {mode !== "command" ? (
+                <AgentSelector
+                  agent={agent}
+                  model={model}
+                  mode={agentMode}
+                  effort={effort}
+                  agents={agents}
+                  onAgentChange={(nextAgent, nextModel) => {
+                    const nextStatus = agents.find((item) => item.name === nextAgent);
+                    const defaults = getAgentDefaults(nextStatus);
+                    setAgent(nextAgent);
+                    setModel(nextModel || defaults.model);
+                    setAgentMode("");
+                    setEffort(defaults.effort);
+                    setFastService(defaults.fastService);
+                  }}
+                  onModeChange={(nextAgentMode) => setAgentMode(nextAgentMode || "")}
+                  onEffortChange={(nextEffort) => setEffort(nextEffort || "")}
+                  fastService={fastService}
+                  onFastServiceChange={(nextFastService) => setFastService(nextFastService || "")}
+                  compact={true}
+                  warnUnavailable={isSelectedAgentUnavailable}
+                />
+              ) : (
+                <ShellSelector
+                  shell={shell}
+                  shells={shells}
+                  onShellChange={setShell}
+                  compact={true}
+                />
+              )}
 
               <button
                 type="button"

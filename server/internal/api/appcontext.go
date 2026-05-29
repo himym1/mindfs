@@ -9,6 +9,7 @@ import (
 	"mindfs/server/internal/agent"
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/api/usecase"
+	"mindfs/server/internal/commandexec"
 	"mindfs/server/internal/e2ee"
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
@@ -341,6 +342,25 @@ func (s *AppContext) GetCandidateRegistry() *usecase.CandidateRegistry {
 			registry.Register(usecase.NewPromptCandidateProvider(store))
 		}
 		registry.Register(usecase.NewSkillCandidateProvider())
+		registry.Register(usecase.NewCommandCandidateProvider(func() usecase.ShellHistorySpec {
+			if s.Agents == nil {
+				return usecase.ShellHistorySpec{}
+			}
+			cfg := s.Agents.Config()
+			shells := make([]commandexec.ShellSpec, 0, len(cfg.Shells))
+			for _, shell := range cfg.Shells {
+				shells = append(shells, commandexec.ShellSpec{
+					Command:       shell.Command,
+					Args:          append([]string(nil), shell.Args...),
+					LongShellArgs: append([]string(nil), shell.LongShellArgs...),
+					CommandPrefix: shell.CommandPrefix,
+				})
+			}
+			if shell, ok := commandexec.ResolveConfiguredShell(shells); ok {
+				return usecase.ShellHistorySpec{Command: shell.Command}
+			}
+			return usecase.ShellHistorySpec{}
+		}))
 		registry.Register(usecase.NewSlashCommandCandidateProvider(func(agentName string) (agent.Status, bool) {
 			if s.Prober == nil {
 				return agent.Status{}, false

@@ -224,45 +224,46 @@ func resolveStaticDir() string {
 	}
 
 	if exe, err := os.Executable(); err == nil {
-		return resolveStaticDirFromExecutable(exe, shouldPreferWorkingDirStaticDir())
+		return resolveStaticDirFromExecutable(exe)
 	}
 	return ""
 }
 
-func resolveStaticDirFromExecutable(exe string, preferWorkingDir bool) string {
+func resolveStaticDirFromExecutable(exe string) string {
 	exe = strings.TrimSpace(exe)
 	if exe == "" {
 		return ""
 	}
 	exeDir := filepath.Dir(exe)
-	if preferWorkingDir {
-		candidate := filepath.Join(exeDir, "web", "dist")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
+	// 本地构建布局为仓库根目录 mindfs + web/dist。
+	candidate := filepath.Join(exeDir, "web", "dist")
+	if isFrontendStaticDir(candidate) {
+		return candidate
 	}
 	// 发布 zip 解压后，web 目录和可执行文件在同一层级。
-	candidate := filepath.Join(exeDir, "web")
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+	candidate = filepath.Join(exeDir, "web")
+	if isFrontendStaticDir(candidate) {
 		return candidate
 	}
 	// 安装布局为 <prefix>/bin/mindfs + <prefix>/share/mindfs/web。
 	candidate = filepath.Join(filepath.Dir(exeDir), "share", "mindfs", "web")
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+	if isFrontendStaticDir(candidate) {
 		return candidate
 	}
 	return ""
 }
 
-func shouldPreferWorkingDirStaticDir() bool {
-	if len(os.Args) == 0 {
+func isFrontendStaticDir(path string) bool {
+	if strings.TrimSpace(path) == "" {
 		return false
 	}
-	arg0 := strings.TrimSpace(os.Args[0])
-	if arg0 == "" {
-		return false
+	for _, name := range []string{"index.html", "favicon.svg"} {
+		info, err := os.Stat(filepath.Join(path, name))
+		if err != nil || info.IsDir() {
+			return false
+		}
 	}
-	return strings.HasPrefix(arg0, "."+string(os.PathSeparator))
+	return true
 }
 
 func RemoveManagedDirFromRegistry(path string) error {

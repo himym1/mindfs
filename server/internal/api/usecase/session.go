@@ -13,6 +13,7 @@ import (
 
 	"mindfs/server/internal/agent"
 	agenttypes "mindfs/server/internal/agent/types"
+	"mindfs/server/internal/commandexec"
 	"mindfs/server/internal/session"
 )
 
@@ -65,6 +66,16 @@ func (s *Service) ListSessions(ctx context.Context, in ListSessionsInput) (ListS
 	})
 	if err != nil {
 		return ListSessionsOutput{}, err
+	}
+	for _, item := range items {
+		if item == nil || item.Type != session.TypeCommand {
+			continue
+		}
+		aux, err := manager.GetExchangeAux(ctx, item.Key, 0)
+		if err != nil {
+			return ListSessionsOutput{}, err
+		}
+		item.Shell = session.InferCommandShellFromAux(aux)
 	}
 	return ListSessionsOutput{Sessions: items}, nil
 }
@@ -252,14 +263,84 @@ func (s *Service) DeleteSession(ctx context.Context, in DeleteSessionInput) erro
 	if err != nil {
 		return err
 	}
-	if err := manager.Delete(ctx, in.Key); err != nil {
+	keys, err := deleteSessionCascadeKeys(ctx, manager, in.Key)
+	if err != nil {
 		return err
 	}
-	if err := root.RemoveSessionFileMeta(in.Key); err != nil {
-		return err
+	for _, key := range keys {
+		cancelActiveSessionTurn(in.RootID, key)
 	}
-	s.Registry.ReleaseFileWatcher(in.RootID, in.Key)
+	for _, key := range keys {
+		if err := manager.Delete(ctx, key); err != nil {
+			return err
+		}
+		if err := root.RemoveSessionFileMeta(key); err != nil {
+			return err
+		}
+		commandexec.CloseSession(in.RootID, key)
+		s.Registry.ReleaseFileWatcher(in.RootID, key)
+	}
 	return nil
+}
+
+func deleteSessionCascadeKeys(ctx context.Context, manager *session.Manager, key string) ([]string, error) {
+	rootKey := strings.TrimSpace(key)
+	if rootKey == "" {
+		return nil, errors.New("session key required")
+	}
+	items, err := manager.ListMetas(ctx)
+	if err != nil {
+		return nil, err
+	}
+	childrenByParent := make(map[string][]string)
+	exists := false
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		itemKey := strings.TrimSpace(item.Key)
+		if itemKey == "" {
+			continue
+		}
+		if itemKey == rootKey {
+			exists = true
+		}
+		parentKey := strings.TrimSpace(item.ParentSessionKey)
+		if parentKey != "" {
+			childrenByParent[parentKey] = append(childrenByParent[parentKey], itemKey)
+		}
+	}
+	if !exists {
+		return nil, errors.New("session not found")
+	}
+	keys := make([]string, 0, 1)
+	seen := make(map[string]bool)
+	var visit func(string)
+	visit = func(current string) {
+		if seen[current] {
+			return
+		}
+		seen[current] = true
+		for _, childKey := range childrenByParent[current] {
+			visit(childKey)
+		}
+		keys = append(keys, current)
+	}
+	visit(rootKey)
+	return keys, nil
+}
+
+func cancelActiveSessionTurn(rootID, sessionKey string) {
+	active := getActiveTurn(rootID, sessionKey)
+	if active == nil {
+		return
+	}
+	active.cancel()
+	if active.session != nil {
+		if err := active.session.CancelCurrentTurn(); err != nil {
+			log.Printf("[session] turn.cancel.error root=%s session=%s err=%v", rootID, sessionKey, err)
+		}
+	}
 }
 
 type RenameSessionInput struct {
@@ -323,18 +404,23 @@ func prependSwitchHint(in BuildPromptInput, prompt string) string {
 }
 
 type SendMessageInput struct {
-	RootID      string
-	Key         string
-	Agent       string
-	Model       string
-	Mode        string
-	Effort      string
-	FastService string
-	Content     string
-	ClientCtx   ClientContext
-	OnStart     func()
-	OnUpdate    func(agenttypes.Event)
+	RootID              string
+	Key                 string
+	Agent               string
+	Model               string
+	Mode                string
+	Effort              string
+	FastService         string
+	Shell               string
+	Content             string
+	ClientCtx           ClientContext
+	OnStart             func()
+	OnUpdate            func(agenttypes.Event)
+	OnSubSessionCreated func(*session.Session)
+	OnSubSessionUpdate  func(sessionKey string, update agenttypes.Event)
 }
+
+var activeSubagentSubscriptions sync.Map
 
 type AnswerQuestionInput struct {
 	RootID     string
@@ -1085,10 +1171,6 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	if err := s.ensureRegistry(); err != nil {
 		return err
 	}
-	if err := s.validateAgentModel(in.Agent, in.Model); err != nil {
-		log.Printf("[session/model] validate.error root=%s session=%s agent=%s model=%q err=%v", in.RootID, in.Key, strings.TrimSpace(in.Agent), strings.TrimSpace(in.Model), err)
-		return err
-	}
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	registerActiveTurn(in.RootID, in.Key, turnCancel)
 	defer unregisterActiveTurn(in.RootID, in.Key)
@@ -1104,6 +1186,13 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	current, err := manager.Get(ctx, in.Key, 0)
 	if err != nil {
+		return err
+	}
+	if current.Type == session.TypeCommand {
+		return s.sendCommandMessage(turnCtx, in, manager, current)
+	}
+	if err := s.validateAgentModel(in.Agent, in.Model); err != nil {
+		log.Printf("[session/model] validate.error root=%s session=%s agent=%s model=%q err=%v", in.RootID, in.Key, strings.TrimSpace(in.Agent), strings.TrimSpace(in.Model), err)
 		return err
 	}
 	isInitial := len(current.Exchanges) == 0
@@ -1179,6 +1268,21 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 					}
 				}
 				if toolCall, ok := update.Data.(agenttypes.ToolCall); ok {
+					s.ensureSubagentSessions(context.Background(), subagentSessionInput{
+						RootID:      in.RootID,
+						Parent:      current,
+						Agent:       in.Agent,
+						Model:       in.Model,
+						Mode:        in.Mode,
+						Effort:      in.Effort,
+						FastService: in.FastService,
+						RootAbs:     rootAbs,
+						Pool:        agentPool,
+						Manager:     manager,
+						ToolCall:    toolCall,
+						OnCreated:   in.OnSubSessionCreated,
+						OnUpdate:    in.OnSubSessionUpdate,
+					})
 					toolCallCopy := toolCall
 					auxBuffer = append(auxBuffer, session.ExchangeAux{
 						Seq:      plannedAssistantSeq,
@@ -1291,6 +1395,448 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		prober.ReportSuccess(in.Agent)
 	}
 	return nil
+}
+
+type subagentSessionInput struct {
+	RootID      string
+	Parent      *session.Session
+	Agent       string
+	Model       string
+	Mode        string
+	Effort      string
+	FastService string
+	RootAbs     string
+	Pool        *agent.Pool
+	Manager     *session.Manager
+	ToolCall    agenttypes.ToolCall
+	OnCreated   func(*session.Session)
+	OnUpdate    func(sessionKey string, update agenttypes.Event)
+}
+
+func (s *Service) ensureSubagentSessions(ctx context.Context, in subagentSessionInput) {
+	if in.Parent == nil || in.Pool == nil || in.Manager == nil || in.ToolCall.RawType != "collabToolCall" {
+		return
+	}
+	for _, receiverThreadID := range stringSliceMeta(in.ToolCall.Meta, "receiverThreadIds") {
+		receiverThreadID = strings.TrimSpace(receiverThreadID)
+		if receiverThreadID == "" {
+			continue
+		}
+		child, err := s.ensureSubagentSession(ctx, in, receiverThreadID)
+		if err != nil {
+			log.Printf("[subagent] session.ensure.error root=%s parent=%s receiver=%s err=%v", in.RootID, in.Parent.Key, receiverThreadID, err)
+			continue
+		}
+		if child != nil {
+			s.startSubagentSubscription(in, child, receiverThreadID)
+		}
+	}
+}
+
+func (s *Service) ensureSubagentSession(ctx context.Context, in subagentSessionInput, receiverThreadID string) (*session.Session, error) {
+	if existing, err := in.Manager.FindAgentBindingByAgentSession(ctx, in.Agent, receiverThreadID); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return in.Manager.Get(ctx, existing.SessionKey, 0)
+	}
+	child, err := in.Manager.Create(ctx, session.CreateInput{
+		Type:             session.TypeChat,
+		ParentSessionKey: in.Parent.Key,
+		ParentToolCallID: in.ToolCall.CallID,
+		Agent:            in.Agent,
+		Model:            firstNonEmptyString(stringMeta(in.ToolCall.Meta, "model"), in.Model),
+		Name:             subagentSessionName(in.ToolCall, receiverThreadID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := in.Manager.UpsertAgentBinding(ctx, session.AgentBinding{
+		SessionKey:     child.Key,
+		Agent:          in.Agent,
+		AgentSessionID: receiverThreadID,
+	}); err != nil {
+		return nil, err
+	}
+	if in.OnCreated != nil {
+		in.OnCreated(child)
+	}
+	return child, nil
+}
+
+func (s *Service) startSubagentSubscription(in subagentSessionInput, child *session.Session, receiverThreadID string) {
+	key := in.RootID + ":" + child.Key + ":" + receiverThreadID
+	if _, loaded := activeSubagentSubscriptions.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer activeSubagentSubscriptions.Delete(key)
+		ctx, cancel := context.WithCancel(in.Pool.Context())
+		registerActiveTurn(in.RootID, child.Key, cancel)
+		defer unregisterActiveTurn(in.RootID, child.Key)
+		runtime, err := in.Pool.GetOrCreate(ctx, agenttypes.OpenSessionInput{
+			SessionKey:     agentPoolSessionKey(child.Key, in.Agent),
+			AgentName:      in.Agent,
+			Model:          firstNonEmptyString(stringMeta(in.ToolCall.Meta, "model"), in.Model),
+			Mode:           in.Mode,
+			Effort:         firstNonEmptyString(stringMeta(in.ToolCall.Meta, "reasoningEffort"), in.Effort),
+			FastService:    in.FastService,
+			RootPath:       in.RootAbs,
+			AgentSessionID: receiverThreadID,
+			AgentCtxSeq:    child.AgentCtxSeq[in.Agent],
+		})
+		if err != nil {
+			log.Printf("[subagent] subscription.open.error root=%s session=%s receiver=%s err=%v", in.RootID, child.Key, receiverThreadID, err)
+			return
+		}
+		setActiveTurnSession(in.RootID, child.Key, runtime)
+		subscriber, ok := runtime.(agenttypes.ThreadEventSubscriber)
+		if !ok {
+			log.Printf("[subagent] subscription.unsupported root=%s session=%s receiver=%s", in.RootID, child.Key, receiverThreadID)
+			return
+		}
+		markDone := attachBackgroundSessionUpdates(ctx, in, child, runtime)
+		if err := subscriber.SubscribeThreadEvents(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("[subagent] subscription.error root=%s session=%s receiver=%s err=%v", in.RootID, child.Key, receiverThreadID, err)
+		}
+		markDone()
+	}()
+}
+
+func attachBackgroundSessionUpdates(ctx context.Context, in subagentSessionInput, child *session.Session, runtime agenttypes.Session) func() {
+	var responseText string
+	plannedAssistantSeq := len(child.Exchanges) + 1
+	auxBuffer := make([]session.ExchangeAux, 0, 8)
+	var thoughtBuffer strings.Builder
+	lastResponseUpdateType := ""
+	var doneMu sync.Mutex
+	doneSent := false
+	flushThought := func() {
+		thought := thoughtBuffer.String()
+		if strings.TrimSpace(thought) == "" {
+			thoughtBuffer.Reset()
+			return
+		}
+		thoughtBuffer.Reset()
+		auxBuffer = append(auxBuffer, session.ExchangeAux{
+			Seq:     plannedAssistantSeq,
+			Line:    currentAssistantLine(responseText),
+			Thought: thought,
+		})
+	}
+	finish := func(emit bool) {
+		doneMu.Lock()
+		if doneSent {
+			doneMu.Unlock()
+			return
+		}
+		doneSent = true
+		doneMu.Unlock()
+		flushThought()
+		if err := in.Manager.AddExchangeForAgent(ctx, child, "agent", responseText, in.Agent, in.Mode, in.Effort, in.FastService); err != nil {
+			log.Printf("[subagent] persist.agent.error root=%s session=%s err=%v", in.RootID, child.Key, err)
+			return
+		}
+		for _, aux := range dedupeExchangeAuxBuffer(auxBuffer) {
+			if err := in.Manager.AddExchangeAux(ctx, child.Key, aux); err != nil {
+				log.Printf("[subagent] persist.aux.error root=%s session=%s err=%v", in.RootID, child.Key, err)
+				return
+			}
+		}
+		if err := in.Manager.UpdateAgentState(ctx, child, in.Agent, contextLineCount(child.Exchanges), runtime.SessionID()); err != nil {
+			log.Printf("[subagent] persist.agent_state.error root=%s session=%s err=%v", in.RootID, child.Key, err)
+		}
+		if emit && in.OnUpdate != nil {
+			in.OnUpdate(child.Key, agenttypes.Event{Type: agenttypes.EventTypeMessageDone, Data: agenttypes.MessageDone{}})
+		}
+	}
+	runtime.OnUpdate(func(update agenttypes.Event) {
+		update = compactAgentUpdate(update)
+		switch update.Type {
+		case agenttypes.EventTypeThoughtChunk:
+			if chunk, ok := update.Data.(agenttypes.ThoughtChunk); ok && chunk.Content != "" {
+				thoughtBuffer.WriteString(chunk.Content)
+			}
+		case agenttypes.EventTypeToolCall, agenttypes.EventTypeToolUpdate, agenttypes.EventTypeTodoUpdate, agenttypes.EventTypeMessageChunk, agenttypes.EventTypeMessageDone:
+			flushThought()
+		}
+		if update.Type == agenttypes.EventTypeToolCall || update.Type == agenttypes.EventTypeToolUpdate {
+			if toolCall, ok := update.Data.(agenttypes.ToolCall); ok {
+				toolCallCopy := toolCall
+				auxBuffer = append(auxBuffer, session.ExchangeAux{
+					Seq:      plannedAssistantSeq,
+					Line:     currentAssistantLine(responseText),
+					ToolCall: &toolCallCopy,
+				})
+			}
+		}
+		if update.Type == agenttypes.EventTypeMessageChunk {
+			if chunk, ok := update.Data.(agenttypes.MessageChunk); ok {
+				responseText = appendResponseChunk(responseText, lastResponseUpdateType, chunk.Content)
+				lastResponseUpdateType = string(update.Type)
+			}
+		} else if update.Type == agenttypes.EventTypeThoughtChunk ||
+			update.Type == agenttypes.EventTypeToolCall ||
+			update.Type == agenttypes.EventTypeToolUpdate ||
+			update.Type == agenttypes.EventTypeTodoUpdate {
+			lastResponseUpdateType = string(update.Type)
+		}
+		if update.Type != agenttypes.EventTypeMessageDone {
+			if in.OnUpdate != nil {
+				in.OnUpdate(child.Key, update)
+			}
+			return
+		}
+		finish(false)
+		if in.OnUpdate != nil {
+			in.OnUpdate(child.Key, update)
+		}
+	})
+	return func() { finish(true) }
+}
+
+func (s *Service) sendCommandMessage(ctx context.Context, in SendMessageInput, manager *session.Manager, current *session.Session) error {
+	if strings.TrimSpace(in.Content) == "" {
+		return errors.New("command required")
+	}
+	root := manager.Root()
+	rootAbs, err := root.RootDir()
+	if err != nil {
+		return err
+	}
+	callID := "cmd-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	plannedAssistantSeq := len(current.Exchanges) + 2
+	startTool := agenttypes.ToolCall{
+		CallID:  callID,
+		Title:   in.Content,
+		Status:  "running",
+		Kind:    agenttypes.ToolKindExecute,
+		RawType: "commandExecution",
+		Meta: map[string]any{
+			"source":  "userShell",
+			"phase":   "start",
+			"command": in.Content,
+			"cwd":     ".",
+		},
+	}
+	if in.OnUpdate != nil {
+		in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeToolCall, Data: startTool})
+	}
+
+	proc, err := commandexec.StartInSession(ctx, commandexec.Options{
+		Command: in.Content,
+		Cwd:     rootAbs,
+		Shells:  configuredShells(s.Registry),
+		Shell:   in.Shell,
+		RootID:  in.RootID,
+		Session: current.Key,
+	})
+	if err != nil {
+		log.Printf("[command] start.error root=%s session=%s command=%q err=%v", in.RootID, current.Key, in.Content, err)
+		final := startTool
+		final.Status = "failed"
+		final.Meta = cloneMeta(final.Meta)
+		final.Meta["phase"] = "final"
+		final.Meta["exitCode"] = -1
+		final.Meta["error"] = err.Error()
+		final.Content = []agenttypes.ToolCallContentItem{{Type: "text", Text: err.Error()}}
+		if in.OnUpdate != nil {
+			in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: final})
+			in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeMessageDone, Data: agenttypes.MessageDone{}})
+		}
+		if persistErr := persistCommandTurn(ctx, manager, current, in.Content, final, plannedAssistantSeq); persistErr != nil {
+			return persistErr
+		}
+		return err
+	}
+
+	limiter := commandexec.NewOutputLimiter()
+	ticker := time.NewTicker(limiter.FlushEvery())
+	defer ticker.Stop()
+	done := make(chan commandexec.Result, 1)
+	go func() {
+		done <- proc.Wait()
+	}()
+
+	var result commandexec.Result
+	var haveResult bool
+	cancelStarted := false
+	outputCh := proc.Output()
+	for !haveResult {
+		select {
+		case chunk, ok := <-outputCh:
+			if !ok {
+				outputCh = nil
+				continue
+			}
+			limiter.Write(chunk)
+		case <-ticker.C:
+			flushCommandOutput(in.OnUpdate, startTool, limiter)
+			ticker.Reset(limiter.FlushEvery())
+		case result = <-done:
+			haveResult = true
+		case <-ctx.Done():
+			if !cancelStarted {
+				cancelStarted = true
+				go stopCommandProcess(proc)
+			}
+		}
+	}
+	drainCommandOutput(proc.Output(), limiter, 250*time.Millisecond)
+	flushCommandOutput(in.OnUpdate, startTool, limiter)
+
+	final := startTool
+	final.Status = "success"
+	if cancelStarted || ctx.Err() != nil {
+		final.Status = "cancelled"
+	} else if result.ExitCode != 0 {
+		final.Status = "failed"
+	}
+	tail := limiter.Tail()
+	persistedBytes := limiter.TailBytes()
+	outputBytes := limiter.TotalBytes()
+	text := string(tail)
+	if strings.TrimSpace(result.Shell) != "" {
+		if err := manager.UpdateShell(context.Background(), current, result.Shell); err != nil {
+			log.Printf("[command] shell.update.error root=%s session=%s shell=%q err=%v", in.RootID, current.Key, result.Shell, err)
+		}
+	}
+	if outputBytes > persistedBytes {
+		text = fmt.Sprintf("[output truncated: showing last %d bytes of %d bytes]\n%s", persistedBytes, outputBytes, text)
+	}
+	final.Meta = map[string]any{
+		"source":         "userShell",
+		"phase":          "final",
+		"command":        in.Content,
+		"cwd":            ".",
+		"shell":          result.Shell,
+		"exitCode":       result.ExitCode,
+		"durationMs":     result.Duration.Milliseconds(),
+		"outputBytes":    outputBytes,
+		"persistedBytes": persistedBytes,
+		"truncated":      outputBytes > persistedBytes,
+		"truncation":     "tail",
+	}
+	if cancelStarted || ctx.Err() != nil {
+		final.Meta["cancelled"] = true
+	}
+	final.Content = []agenttypes.ToolCallContentItem{{Type: "text", Text: text}}
+	if in.OnUpdate != nil {
+		in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: final})
+		in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeMessageDone, Data: agenttypes.MessageDone{}})
+	}
+	if err := persistCommandTurn(context.Background(), manager, current, in.Content, final, plannedAssistantSeq); err != nil {
+		log.Printf("[command] persist.error root=%s session=%s call=%s err=%v", in.RootID, current.Key, callID, err)
+		return err
+	}
+	if final.Status == "success" || final.Status == "cancelled" {
+		if err := UpsertCommandSuggestion(manager, CommandSuggestion{
+			Command:        in.Content,
+			Cwd:            ".",
+			Shell:          result.Shell,
+			RootID:         in.RootID,
+			LastExitCode:   result.ExitCode,
+			LastDurationMs: result.Duration.Milliseconds(),
+			LastUsedAt:     result.FinishedAt,
+		}); err != nil {
+			log.Printf("[command/history] upsert.error root=%s session=%s err=%v", in.RootID, current.Key, err)
+		}
+	}
+	return nil
+}
+
+func flushCommandOutput(onUpdate func(agenttypes.Event), base agenttypes.ToolCall, limiter *commandexec.OutputLimiter) {
+	if onUpdate == nil || limiter == nil {
+		return
+	}
+	chunk, ok := limiter.Flush()
+	if !ok {
+		return
+	}
+	update := base
+	update.Status = "running"
+	update.Meta = map[string]any{
+		"source":       "userShell",
+		"phase":        "stream",
+		"outputMode":   "ring",
+		"skippedBytes": chunk.SkippedBytes,
+	}
+	update.Content = []agenttypes.ToolCallContentItem{{Type: "text", Text: chunk.Text}}
+	onUpdate(agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: update})
+}
+
+func drainCommandOutput(output <-chan []byte, limiter *commandexec.OutputLimiter, maxWait time.Duration) {
+	if output == nil || limiter == nil {
+		return
+	}
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	for {
+		select {
+		case chunk, ok := <-output:
+			if !ok {
+				return
+			}
+			if len(chunk) > 0 {
+				limiter.Write(chunk)
+			}
+		case <-timer.C:
+			return
+		}
+	}
+}
+
+func stopCommandProcess(proc commandexec.Process) {
+	if proc == nil {
+		return
+	}
+	_ = proc.Interrupt()
+	time.Sleep(2 * time.Second)
+	_ = proc.Terminate()
+	time.Sleep(3 * time.Second)
+	_ = proc.KillTree()
+}
+
+func configuredShells(registry Registry) []commandexec.ShellSpec {
+	if registry == nil {
+		return nil
+	}
+	pool := registry.GetAgentPool()
+	if pool == nil {
+		return nil
+	}
+	cfg := pool.Config()
+	shells := make([]commandexec.ShellSpec, 0, len(cfg.Shells))
+	for _, shell := range cfg.Shells {
+		shells = append(shells, commandexec.ShellSpec{
+			Command:       shell.Command,
+			Args:          append([]string(nil), shell.Args...),
+			LongShellArgs: append([]string(nil), shell.LongShellArgs...),
+			CommandPrefix: shell.CommandPrefix,
+		})
+	}
+	return shells
+}
+
+func persistCommandTurn(ctx context.Context, manager *session.Manager, current *session.Session, command string, final agenttypes.ToolCall, plannedAssistantSeq int) error {
+	if err := manager.AddExchangeForAgent(ctx, current, "user", command, "", "", "", ""); err != nil {
+		return err
+	}
+	if err := manager.AddExchangeForAgent(ctx, current, "agent", "", "", "", "", ""); err != nil {
+		return err
+	}
+	return manager.AddExchangeAux(ctx, current.Key, session.ExchangeAux{
+		Seq:      plannedAssistantSeq,
+		Line:     0,
+		ToolCall: &final,
+	})
+}
+
+func cloneMeta(meta map[string]any) map[string]any {
+	out := make(map[string]any, len(meta))
+	for k, v := range meta {
+		out[k] = v
+	}
+	return out
 }
 
 type SendRecoveryInput struct {
@@ -1456,6 +2002,58 @@ func appendResponseChunk(responseText, lastResponseUpdateType, chunk string) str
 		responseText += "\n\n"
 	}
 	return responseText + chunk
+}
+
+func subagentSessionName(toolCall agenttypes.ToolCall, receiverThreadID string) string {
+	if prompt := stringMeta(toolCall.Meta, "prompt"); prompt != "" {
+		return truncateRunes(prompt, 48)
+	}
+	return truncateRunes(receiverThreadID, 16)
+}
+
+func stringMeta(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	value, _ := meta[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func stringSliceMeta(meta map[string]any, key string) []string {
+	if meta == nil {
+		return nil
+	}
+	switch value := meta[key].(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if limit <= 0 || len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "..."
 }
 
 type pathNormalizer interface {

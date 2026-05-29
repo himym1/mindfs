@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -126,6 +127,51 @@ func TestLoadConfigReadsRelayBaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsShells(t *testing.T) {
+	cfg := loadPoolTestConfig(t)
+	var want []Shell
+	if runtime.GOOS == "windows" {
+		want = []Shell{{Command: "pwsh", Args: []string{"-NoLogo", "-NoProfile", "-Command"}, LongShellArgs: []string{"-NoLogo", "-NoProfile"}, CommandPrefix: windowsPowerShellCommandPrefix(), OS: []string{"windows"}}}
+	} else {
+		want = []Shell{
+			{Command: "zsh", Args: []string{"-ic"}, LongShellArgs: []string{}, OS: []string{"darwin", "linux"}},
+			{Command: "bash", Args: []string{"-ic"}, LongShellArgs: []string{}, OS: []string{"darwin", "linux"}},
+			{Command: "sh", Args: []string{"-lc"}, LongShellArgs: []string{}, OS: []string{"darwin", "linux"}},
+		}
+	}
+	if got := cfg.Shells; !reflect.DeepEqual(got, want) {
+		t.Fatalf("shells = %#v, want %#v", got, want)
+	}
+}
+
+func TestNormalizeConfigFiltersShellsByOS(t *testing.T) {
+	cfg, err := normalizeConfig(Config{
+		Shells: []Shell{
+			{Command: "zsh", Args: []string{"-ic"}, OS: []string{"darwin", "linux"}},
+			{Command: "pwsh", Args: []string{"-NoLogo", "-NoProfile", "-Command"}, OS: []string{"windows"}},
+			{Command: "portable", Args: []string{"-c"}},
+		},
+		Agents: []Definition{{Name: "codex", Command: "codex"}},
+	})
+	if err != nil {
+		t.Fatalf("normalizeConfig: %v", err)
+	}
+	for _, shell := range cfg.Shells {
+		if len(shell.OS) == 0 {
+			continue
+		}
+		matched := false
+		for _, value := range shell.OS {
+			if value == runtime.GOOS {
+				matched = true
+			}
+		}
+		if !matched {
+			t.Fatalf("shell %q with os %#v should have been filtered on %s", shell.Command, shell.OS, runtime.GOOS)
+		}
+	}
+}
+
 func TestLoadConfigReadsOMPAgent(t *testing.T) {
 	cfg := loadPoolTestConfig(t)
 	def, ok := cfg.GetAgent("omp")
@@ -143,6 +189,7 @@ func TestLoadConfigReadsOMPAgent(t *testing.T) {
 func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	base := Config{
 		RelayBaseURL: "https://relay.default.example.com",
+		Shells:       []Shell{{Command: "zsh", Args: []string{"-ic"}}, {Command: "bash", Args: []string{"-ic"}}},
 		Agents: []Definition{
 			{Name: "codex", Command: "codex", Protocol: ProtocolCodexSDK},
 			{Name: "new-agent", Command: "new-agent", Protocol: ProtocolACP},
@@ -150,6 +197,7 @@ func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	}
 	override := Config{
 		RelayBaseURL: "https://relay.user.example.com",
+		Shells:       []Shell{{Command: "fish", Args: []string{"-i", "-c"}}, {Command: "zsh", Args: []string{"-ic"}}},
 		Agents: []Definition{
 			{Name: "codex", Command: "custom-codex", Protocol: ProtocolCodexSDK, Args: []string{"--profile", "work"}},
 			{Name: "local-agent", Command: "local-agent", Protocol: ProtocolACP},
@@ -159,6 +207,14 @@ func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	cfg := mergeConfigs(base, override)
 	if cfg.RelayBaseURL != override.RelayBaseURL {
 		t.Fatalf("relay base url = %q", cfg.RelayBaseURL)
+	}
+	wantShells := []Shell{
+		{Command: "fish", Args: []string{"-i", "-c"}},
+		{Command: "zsh", Args: []string{"-ic"}},
+		{Command: "bash", Args: []string{"-ic"}},
+	}
+	if !reflect.DeepEqual(cfg.Shells, wantShells) {
+		t.Fatalf("shells = %#v, want %#v", cfg.Shells, wantShells)
 	}
 	if len(cfg.Agents) != 3 {
 		t.Fatalf("agents length = %d, want 3", len(cfg.Agents))
@@ -178,25 +234,31 @@ func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadConfigPrefersWorkingDirAgentsJSONForRelativeLaunch(t *testing.T) {
-	t.Setenv(configPathEnvKey, "")
+func TestInstalledDefaultConfigPathPrefersExecutableDirectory(t *testing.T) {
 	tempDir := t.TempDir()
-	configPath := filepath.Join(tempDir, "agents.json")
-	if err := os.WriteFile(configPath, []byte(`{"agents":[{"name":"local-agent","command":"local-agent"}]}`), 0o644); err != nil {
+	exeDir := filepath.Join(tempDir, "archive")
+	if err := os.MkdirAll(exeDir, 0o755); err != nil {
+		t.Fatalf("mkdir exe dir: %v", err)
+	}
+	configPath := filepath.Join(exeDir, "agents.json")
+	if err := os.WriteFile(configPath, []byte(`{"agents":[{"name":"zip-agent","command":"zip-agent"}]}`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	t.Chdir(tempDir)
-	originalArgs := os.Args
-	os.Args = []string{"./mindfs"}
-	t.Cleanup(func() { os.Args = originalArgs })
-
-	cfg, err := LoadConfig("")
-	if err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
+	got := installedDefaultConfigPathFromExecutable(filepath.Join(exeDir, "mindfs.exe"))
+	if got != configPath {
+		t.Fatalf("installedDefaultConfigPathFromExecutable() = %q, want %q", got, configPath)
 	}
-	if _, ok := cfg.GetAgent("local-agent"); !ok {
-		t.Fatalf("expected local-agent from working directory agents.json")
+}
+
+func TestInstalledDefaultConfigPathFallsBackToInstalledLayout(t *testing.T) {
+	tempDir := t.TempDir()
+	exeDir := filepath.Join(tempDir, "bin")
+	want := filepath.Join(tempDir, "share", "mindfs", "agents.json")
+
+	got := installedDefaultConfigPathFromExecutable(filepath.Join(exeDir, "mindfs.exe"))
+	if got != want {
+		t.Fatalf("installedDefaultConfigPathFromExecutable() = %q, want %q", got, want)
 	}
 }
 

@@ -33,8 +33,6 @@ var errBrowserUnavailable = errors.New("browser auto-open unavailable")
 const (
 	daemonEnvKey          = "MINDFS_DAEMON"
 	internalRestartEnvKey = "MINDFS_INTERNAL_RESTART"
-	staticDirEnvKey       = "MINDFS_STATIC_DIR"
-	agentsConfigEnvKey    = "MINDFS_AGENTS_CONFIG"
 	maxLogSizeBytes       = 10 * 1024 * 1024
 	maxLogBackups         = 3
 )
@@ -345,12 +343,6 @@ func startBackgroundProcess(logPath string) error {
 	}
 	cmd := exec.Command(exe, os.Args[1:]...)
 	cmd.Env = append(cmd.Environ(), daemonEnvKey+"=1")
-	if staticDir := resolveDevelopmentStaticDir(); staticDir != "" {
-		cmd.Env = append(cmd.Env, staticDirEnvKey+"="+staticDir)
-	}
-	if agentsConfig := resolveWorkingDirAgentsConfig(); agentsConfig != "" {
-		cmd.Env = append(cmd.Env, agentsConfigEnvKey+"="+agentsConfig)
-	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -360,44 +352,6 @@ func startBackgroundProcess(logPath string) error {
 		return err
 	}
 	return logFile.Close()
-}
-
-func resolveDevelopmentStaticDir() string {
-	if len(os.Args) == 0 {
-		return ""
-	}
-	arg0 := strings.TrimSpace(os.Args[0])
-	if arg0 == "" || !strings.HasPrefix(arg0, "."+string(os.PathSeparator)) {
-		return ""
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	candidate := filepath.Join(cwd, "web", "dist")
-	if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-		return candidate
-	}
-	return ""
-}
-
-func resolveWorkingDirAgentsConfig() string {
-	if len(os.Args) == 0 {
-		return ""
-	}
-	arg0 := strings.TrimSpace(os.Args[0])
-	if arg0 == "" || !strings.HasPrefix(arg0, "."+string(os.PathSeparator)) {
-		return ""
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	candidate := filepath.Join(cwd, "agents.json")
-	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-		return candidate
-	}
-	return ""
 }
 
 func rotateLogIfNeeded(path string, maxSize int64, backups int) error {

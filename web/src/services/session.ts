@@ -4,7 +4,7 @@ import { e2eeService } from "./e2ee";
 
 // Session service for managing agent sessions
 
-export type SessionType = "chat" | "plugin";
+export type SessionType = "chat" | "plugin" | "command";
 
 export type RelatedFile = {
   path: string;
@@ -22,8 +22,11 @@ export type ExchangeAux = {
 export type Session = {
   key: string;
   type: SessionType;
+  parent_session_key?: string;
+  parent_tool_call_id?: string;
   agent?: string;
   model?: string;
+  shell?: string;
   mode?: string;
   effort?: string;
   fast_service?: string;
@@ -60,8 +63,11 @@ export type Session = {
 export type SessionSearchHit = {
   key: string;
   type: SessionType;
+  parent_session_key?: string;
+  parent_tool_call_id?: string;
   agent?: string;
   model?: string;
+  shell?: string;
   name: string;
   created_at: string;
   updated_at: string;
@@ -564,6 +570,7 @@ class SessionService {
     effort?: string,
     fastService?: string,
     context?: Record<string, unknown>,
+    shell?: string,
     requestId = this.createRequestId("msg"),
   ): Promise<boolean> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -589,6 +596,7 @@ class SessionService {
         agent_mode: agentMode,
         effort,
         fast_service: fastService,
+        shell,
         context: this.compactContext(sessionKey, context),
       },
     };

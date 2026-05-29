@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"mindfs/server/internal/agent"
 	rootfs "mindfs/server/internal/fs"
+	"mindfs/server/internal/session"
 
 	"gopkg.in/yaml.v3"
 )
@@ -22,6 +24,7 @@ const (
 	CandidateTypePrompt       CandidateType = "prompt"
 	CandidateTypeSkill        CandidateType = "skill"
 	CandidateTypeSlashCommand CandidateType = "slash_command"
+	CandidateTypeCommand      CandidateType = "command"
 )
 
 type CandidateItem struct {
@@ -208,7 +211,7 @@ func (p *SkillCandidateProvider) Search(ctx context.Context, root rootfs.RootInf
 	for _, dir := range skillScanDirs(root, agent) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if isMissingSkillScanDir(err) {
 				continue
 			}
 			return nil, err
@@ -245,6 +248,10 @@ func (p *SkillCandidateProvider) Search(ctx context.Context, root rootfs.RootInf
 	}
 	sortCandidateItems(items, query)
 	return limitCandidateItems(items), nil
+}
+
+func isMissingSkillScanDir(err error) bool {
+	return os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR)
 }
 
 func isSkillDirectoryEntry(parent string, entry os.DirEntry) bool {
@@ -333,9 +340,36 @@ func (p *PromptCandidateProvider) Search(ctx context.Context, _ rootfs.RootInfo,
 	return items, nil
 }
 
+type CommandCandidateProvider struct {
+	shellProvider func() ShellHistorySpec
+}
+
+func NewCommandCandidateProvider(shellProvider ...func() ShellHistorySpec) *CommandCandidateProvider {
+	provider := &CommandCandidateProvider{}
+	if len(shellProvider) > 0 {
+		provider.shellProvider = shellProvider[0]
+	}
+	return provider
+}
+
+func (p *CommandCandidateProvider) Type() CandidateType {
+	return CandidateTypeCommand
+}
+
+func (p *CommandCandidateProvider) Search(ctx context.Context, root rootfs.RootInfo, _ string, query string) ([]CandidateItem, error) {
+	manager := session.NewManager(root)
+	var shell ShellHistorySpec
+	if p.shellProvider != nil {
+		shell = p.shellProvider()
+	}
+	return SearchCommandCandidates(ctx, manager, root.ID, query, maxCandidateItems, shell)
+}
+
 func validateSearchCandidatesInput(in SearchCandidatesInput) error {
 	switch in.Type {
 	case CandidateTypeFile:
+		return nil
+	case CandidateTypeCommand:
 		return nil
 	case CandidateTypePrompt:
 		return nil

@@ -1,4 +1,6 @@
-import React, { memo, useEffect, useMemo, useState } from "react";
+import React, { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import type { ToolCallContentItem, ToolCallLocation } from "../../services/session";
 import { MarkdownViewer } from "../MarkdownViewer";
 
@@ -10,6 +12,7 @@ type ToolCallCardProps = {
   content?: ToolCallContentItem[];
   result?: string;
   locations?: ToolCallLocation[];
+  meta?: Record<string, unknown>;
   rootPath?: string;
   defaultExpanded?: boolean;
 };
@@ -110,6 +113,24 @@ function renderToolIcon(kind: string): React.ReactNode {
   return toolIcons[kind] || toolIcons.other;
 }
 
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function normalizeTerminalText(text: string): string {
+  return (text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n+$/g, "");
+}
+
+function outputMetrics(text: string, cols: number): { cols: number; rows: number } {
+  const normalized = stripAnsi(normalizeTerminalText(text));
+  const lines = normalized.split("\n");
+  const visualRows = lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / cols)), 0);
+  return {
+    cols,
+    rows: Math.max(1, Math.min(24, visualRows || 1)),
+  };
+}
+
 const statusColors: Record<string, string> = {
   running: "#f59e0b",
   in_progress: "#f59e0b",
@@ -119,6 +140,104 @@ const statusColors: Record<string, string> = {
   error: "#ef4444",
 };
 
+const terminalFontSize = 12;
+const terminalLineHeight = 1.45;
+const terminalLinePx = Math.ceil(terminalFontSize * terminalLineHeight);
+const terminalViewportPadding = 6;
+const terminalFontFamily =
+  '"Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei Mono", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace';
+
+function measureTerminalCharWidth(container: HTMLElement): number {
+  const probe = document.createElement("span");
+  probe.textContent = "mmmmmmmmmm";
+  probe.style.position = "absolute";
+  probe.style.visibility = "hidden";
+  probe.style.pointerEvents = "none";
+  probe.style.whiteSpace = "pre";
+  probe.style.fontFamily = terminalFontFamily;
+  probe.style.fontSize = `${terminalFontSize}px`;
+  container.appendChild(probe);
+  const width = probe.getBoundingClientRect().width / 10;
+  probe.remove();
+  return width > 0 ? width : 7.25;
+}
+
+function XtermOutput({ text }: { text: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const [cols, setCols] = useState(120);
+  const displayText = useMemo(() => normalizeTerminalText(text), [text]);
+  const metrics = useMemo(() => outputMetrics(displayText, cols), [displayText, cols]);
+  const terminalHeight = Math.max(terminalLinePx, metrics.rows * terminalLinePx + terminalViewportPadding);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const updateCols = () => {
+      const width = container.clientWidth || 0;
+      if (width <= 0) return;
+      const charWidth = measureTerminalCharWidth(container);
+      setCols(Math.max(20, Math.floor(width / charWidth) - 1));
+    };
+    updateCols();
+    const observer = new ResizeObserver(updateCols);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const terminal = new Terminal({
+      cols: metrics.cols,
+      rows: metrics.rows,
+      convertEol: true,
+      cursorBlink: false,
+      disableStdin: true,
+      scrollback: 5000,
+      fontFamily: terminalFontFamily,
+      fontSize: terminalFontSize,
+      lineHeight: terminalLineHeight,
+      theme: {
+        background: "#0f172a",
+        foreground: "#e5e7eb",
+      },
+    });
+    terminal.open(container);
+    terminalRef.current = terminal;
+    return () => {
+      terminal.dispose();
+      terminalRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.reset();
+    terminal.resize(metrics.cols, metrics.rows);
+    terminal.write(displayText || "");
+  }, [displayText, metrics.cols, metrics.rows]);
+
+  return (
+    <div
+      style={{
+        marginTop: "10px",
+        padding: "8px",
+        borderRadius: "8px",
+        background: "#0f172a",
+        overflowX: "hidden",
+        overflowY: "hidden",
+        width: "100%",
+        boxSizing: "border-box",
+        height: `${terminalHeight + 16}px`,
+      }}
+    >
+      <div ref={containerRef} style={{ width: "100%", height: `${terminalHeight}px`, overflow: "hidden" }} />
+    </div>
+  );
+}
+
 export const ToolCallCard = memo(function ToolCallCard({
   kind,
   title,
@@ -127,17 +246,28 @@ export const ToolCallCard = memo(function ToolCallCard({
   content,
   result,
   locations,
+  meta,
   rootPath,
   defaultExpanded = false,
 }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const labelKind = (kind || "").trim();
   const labelTitle = (title || "").trim();
+  const normalizedKind = labelKind.toLowerCase();
+  const isCollabTool = meta?.rawType === "collabToolCall" || meta?.type === "collabAgentToolCall";
+  const collabToolName = typeof meta?.tool === "string" ? meta.tool.trim() : "";
+  const isCollabWait = isCollabTool && collabToolName === "wait";
+  const isUserShell = normalizedKind === "execute" && meta?.source === "userShell";
+  const userShellText = useMemo(
+    () => (content || []).map((item) => ("text" in item ? item.text || "" : "")).join("") || result || "",
+    [content, result],
+  );
   const hasContent = !!(content && content.length > 0);
   const hasLocations = !!(locations && locations.length > 0);
   const hasResult = !!result;
-  const hasDetails = hasContent || hasLocations || hasResult;
-  const normalizedKind = labelKind.toLowerCase();
+  const hasUserShellOutput = userShellText.trim().length > 0;
+  const hasCollabDetails = isCollabTool && !isCollabWait && Boolean(meta?.prompt);
+  const hasDetails = isUserShell ? hasUserShellOutput : hasContent || hasLocations || hasResult || hasCollabDetails;
   const icon = renderToolIcon(normalizedKind);
   const normalizedStatus = (status || "").toLowerCase();
   const detailSections = useMemo(() => buildDetailSections(content, locations, rootPath), [content, locations, rootPath]);
@@ -156,7 +286,11 @@ export const ToolCallCard = memo(function ToolCallCard({
       .filter(Boolean);
     return Array.from(new Set([...diffNames, ...locationNames]));
   }, [detailSections, locations, rootPath]);
-  const label = isFileChange
+  const label = isUserShell
+    ? String(meta?.command || labelTitle || "command")
+    : isCollabTool
+    ? labelTitle || collabToolName || "subagent"
+    : isFileChange
     ? labelKind || "edit"
     : [labelKind, labelTitle].filter(Boolean).join(" ").trim() || labelKind || labelTitle || "tool";
   const isRunning = normalizedStatus === "running" || normalizedStatus === "in_progress";
@@ -164,10 +298,14 @@ export const ToolCallCard = memo(function ToolCallCard({
   const isFailed = normalizedStatus === "failed" || normalizedStatus === "error";
   const hasStructuredDetails = detailSections.length > 0;
   useEffect(() => {
-    if (!isRunning || !hasDetails) {
+    if (!hasDetails) {
       setExpanded(false);
+      return;
     }
-  }, [hasDetails, isRunning]);
+    if (defaultExpanded) {
+      setExpanded(true);
+    }
+  }, [defaultExpanded, hasDetails]);
   
   const statusColor = statusColors[normalizedStatus] || "#9ca3af";
 
@@ -280,7 +418,11 @@ export const ToolCallCard = memo(function ToolCallCard({
             overflowY: "auto",
           }}
         >
-          {hasStructuredDetails ? (
+          {isUserShell ? (
+            <XtermOutput text={userShellText} />
+          ) : isCollabTool ? (
+            <CollabToolDetails meta={meta} />
+          ) : hasStructuredDetails ? (
             <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginTop: "10px" }}>
               {detailSections.map((section, index) => (
                 <div key={`${section.type}-${index}`} style={{ minWidth: 0 }}>
@@ -342,6 +484,15 @@ export const ToolCallCard = memo(function ToolCallCard({
     </div>
   );
 });
+
+function CollabToolDetails({ meta }: { meta?: Record<string, unknown> }) {
+  const prompt = typeof meta?.prompt === "string" ? meta.prompt.trim() : "";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px", minWidth: 0 }}>
+      {prompt ? <MarkdownViewer content={prompt} /> : null}
+    </div>
+  );
+}
 
 function prefixDiffLines(text: string, prefix: "+" | "-"): string[] {
   return text.split("\n").map((line) => `${prefix}${line}`);

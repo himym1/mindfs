@@ -1,5 +1,7 @@
 github.com/coder/acp-go-sdk v0.6.4-0.20260227160919-584abe6abe22 h1:hwveFaJNFv5CUb+M/VviN8EKhkj2xHymIARveBr7I1U=
 github.com/coder/acp-go-sdk v0.6.4-0.20260227160919-584abe6abe22/go.mod h1:yKzM/3R9uELp4+nBAwwtkS0aN1FOFjo11CNPy37yFko=
+github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
+github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
@@ -28,8 +30,8 @@ github.com/stretchr/testify v1.8.1 h1:w7B6lhMri9wdJUVmEZPGGhZzrYTPvgJArz7wNPgYKs
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
 github.com/yandc/claude-agent-sdk-go v0.0.0-20260522150919-fb65168f43b8 h1:vC5GMuqc7FoayFhhv9ucMbZD3niC4JKgdkRZj5l3LuI=
 github.com/yandc/claude-agent-sdk-go v0.0.0-20260522150919-fb65168f43b8/go.mod h1:F0UH/dW/gpCuTfWRWa2qwT18HeiYwUTSd+Q6KSFHIjo=
-github.com/yandc/codex-go-sdk v0.0.0-20260518073759-7bc2e8d2227f h1:43ekzcss89fwKXkynudk61n8cg6/Ttnm2iIkvmHP0Kw=
-github.com/yandc/codex-go-sdk v0.0.0-20260518073759-7bc2e8d2227f/go.mod h1:YTvQqlQmaABafBpZf5dftTiLj03hBgoR8a9UTZR/TNQ=
+github.com/yandc/codex-go-sdk v0.0.0-20260529040326-0f827546a2cb h1:Apf+fFMddEyt+lUuWgeuU2Kf4EvYtUqCQuXVBKS4Qi8=
+github.com/yandc/codex-go-sdk v0.0.0-20260529040326-0f827546a2cb/go.mod h1:YTvQqlQmaABafBpZf5dftTiLj03hBgoR8a9UTZR/TNQ=
 golang.org/x/crypto v0.50.0 h1:zO47/JPrL6vsNkINmLoo/PH1gcxpls50DNogFvB5ZGI=
 golang.org/x/crypto v0.50.0/go.mod h1:3muZ7vA7PBCE6xgPX7nkzzjiUq87kRItoJQM1Yo8S+Q=
 golang.org/x/mod v0.34.0 h1:xIHgNUUnW6sYkcM5Jleh05DvLOtwc6RitGHbDk4akRI=

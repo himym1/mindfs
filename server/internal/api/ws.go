@@ -213,13 +213,16 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 		Payload: map[string]any{
 			"root_id": rootID,
 			"session": map[string]any{
-				"key":          sess.Key,
-				"name":         sess.Name,
-				"model":        sess.Model,
-				"mode":         session.InferModeFromSession(sess),
-				"effort":       session.InferEffortFromSession(sess),
-				"fast_service": session.InferFastServiceFromSession(sess),
-				"updated_at":   sess.UpdatedAt,
+				"key":                 sess.Key,
+				"type":                sess.Type,
+				"parent_session_key":  sess.ParentSessionKey,
+				"parent_tool_call_id": sess.ParentToolCallID,
+				"name":                sess.Name,
+				"model":               sess.Model,
+				"mode":                session.InferModeFromSession(sess),
+				"effort":              session.InferEffortFromSession(sess),
+				"fast_service":        session.InferFastServiceFromSession(sess),
+				"updated_at":          sess.UpdatedAt,
 			},
 		},
 	}
@@ -368,7 +371,8 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	agentMode := getString(req.Payload, "agent_mode")
 	effort := getString(req.Payload, "effort")
 	fastService := normalizeFastServiceValue(getString(req.Payload, "fast_service"))
-	if content == "" || sessionType == "" || agentName == "" {
+	shell := getString(req.Payload, "shell")
+	if content == "" || sessionType == "" || (agentName == "" && sessionType != session.TypeCommand) {
 		h.sendWSError(conn, clientID, req.ID, "invalid_request", "content, type and agent required")
 		return
 	}
@@ -390,6 +394,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 				Type:  sessionType,
 				Agent: agentName,
 				Model: model,
+				Shell: shell,
 				Name:  sessionName,
 			},
 		})
@@ -399,26 +404,28 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		}
 		key = created.Key
 		h.broadcastSessionMetaUpdated(rootID, created)
-		go func(rootID, sessionKey, agentName, firstMessage string) {
-			updated, err := uc.SuggestSessionName(context.Background(), usecase.SuggestSessionNameInput{
-				RootID:       rootID,
-				SessionKey:   sessionKey,
-				Agent:        agentName,
-				FirstMessage: firstMessage,
-			})
-			if err != nil {
-				log.Printf("[session-name] async.error root=%s session=%s agent=%s err=%v", rootID, sessionKey, agentName, err)
-				return
-			}
-			if updated == nil {
-				return
-			}
-			if h.AppContext == nil {
-				return
-			}
-			log.Printf("[session-name] async.broadcast root=%s session=%s name=%q", rootID, sessionKey, updated.Name)
-			h.broadcastSessionMetaUpdated(rootID, updated)
-		}(rootID, key, agentName, content)
+		if sessionType != session.TypeCommand {
+			go func(rootID, sessionKey, agentName, firstMessage string) {
+				updated, err := uc.SuggestSessionName(context.Background(), usecase.SuggestSessionNameInput{
+					RootID:       rootID,
+					SessionKey:   sessionKey,
+					Agent:        agentName,
+					FirstMessage: firstMessage,
+				})
+				if err != nil {
+					log.Printf("[session-name] async.error root=%s session=%s agent=%s err=%v", rootID, sessionKey, agentName, err)
+					return
+				}
+				if updated == nil {
+					return
+				}
+				if h.AppContext == nil {
+					return
+				}
+				log.Printf("[session-name] async.broadcast root=%s session=%s name=%q", rootID, sessionKey, updated.Name)
+				h.broadcastSessionMetaUpdated(rootID, updated)
+			}(rootID, key, agentName, content)
+		}
 	} else if current, err := uc.GetSession(ctx, usecase.GetSessionInput{RootID: rootID, Key: key}); err == nil && current != nil {
 		sessionName = current.Name
 	}
@@ -440,6 +447,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		Mode:        agentMode,
 		Effort:      effort,
 		FastService: fastService,
+		Shell:       shell,
 		Content:     content,
 		ClientCtx:   clientCtx,
 		OnStart: func() {
@@ -451,6 +459,23 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 				return
 			}
 			streamHub.BroadcastSessionStream(rootID, key, event)
+		},
+		OnSubSessionCreated: func(created *session.Session) {
+			h.broadcastSessionMetaUpdated(rootID, created)
+			if created != nil {
+				streamHub.SetPendingReply(rootID, created.Key, created.Name)
+			}
+		},
+		OnSubSessionUpdate: func(sessionKey string, update agenttypes.Event) {
+			event := updateToEvent(update)
+			if event == nil {
+				return
+			}
+			streamHub.BroadcastSessionStream(rootID, sessionKey, event)
+			if update.Type == agenttypes.EventTypeMessageDone {
+				streamHub.ClearSessionPending(sessionKey)
+				streamHub.BroadcastSessionDone(rootID, sessionKey, "")
+			}
 		},
 	})
 	if err != nil {

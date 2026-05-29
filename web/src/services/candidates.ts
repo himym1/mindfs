@@ -1,7 +1,7 @@
 import { appURL } from "./base";
 import { protectedJSON } from "./api";
 
-export type CandidateType = "file" | "skill" | "prompt";
+export type CandidateType = "file" | "skill" | "prompt" | "command";
 export type CandidateItemType = CandidateType | "slash_command";
 
 export type CandidateItem = {

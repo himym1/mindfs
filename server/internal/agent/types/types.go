@@ -77,6 +77,10 @@ type DefaultsReader interface {
 	RuntimeDefaults(ctx context.Context) (RuntimeDefaults, error)
 }
 
+type ThreadEventSubscriber interface {
+	SubscribeThreadEvents(ctx context.Context) error
+}
+
 type ExternalSessionSummary struct {
 	Agent          string    `json:"agent"`
 	AgentSessionID string    `json:"agent_session_id"`

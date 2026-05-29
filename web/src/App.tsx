@@ -79,6 +79,7 @@ import { storeRelayNodes } from "./services/launcherNodeSync";
 import { isNativeShellRuntime } from "./services/runtime";
 // 直接导入标准组件
 import { AppShell } from "./layout/AppShell";
+import { ModeIcon } from "./components/ModeIcon";
 import { FileTree } from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
 import { GitDiffViewer } from "./components/GitDiffViewer";
@@ -102,7 +103,7 @@ import {
 import { fetchAgents, type AgentStatus } from "./services/agents";
 
 // 类型定义
-type SessionMode = "chat" | "plugin";
+type SessionMode = "chat" | "plugin" | "command";
 
 function normalizeFastService(
   value: unknown,
@@ -118,6 +119,7 @@ export type SessionItem = {
   type?: SessionMode;
   agent?: string;
   model?: string;
+  shell?: string;
   mode?: string;
   effort?: string;
   fast_service?: "" | "on" | "off";
@@ -189,15 +191,21 @@ function toSessionItem(
     session_key: key,
     root_id: nextRoot,
     name: typeof session?.name === "string" ? session.name : "",
-    type:
-      session?.type === "plugin" || session?.type === "chat"
-        ? session.type
-        : "chat",
+    type: normalizeMode(session?.type),
+    parent_session_key:
+      typeof session?.parent_session_key === "string"
+        ? session.parent_session_key
+        : undefined,
+    parent_tool_call_id:
+      typeof session?.parent_tool_call_id === "string"
+        ? session.parent_tool_call_id
+        : undefined,
     agent:
       typeof session?.agent === "string" && session.agent.trim()
         ? session.agent
         : latestExchangeText(session?.exchanges, "agent"),
     model: typeof session?.model === "string" ? session.model : "",
+    shell: typeof session?.shell === "string" ? session.shell : "",
     mode:
       typeof session?.mode === "string" && session.mode.trim()
         ? session.mode
@@ -316,6 +324,7 @@ type PendingSend = {
   agentMode?: string;
   effort?: string;
   fastService?: "" | "on" | "off";
+  shell?: string;
   message: string;
   timestamp: string;
   requestId?: string;
@@ -639,6 +648,7 @@ function persistFileScrollPositions(positions: Record<string, number>): void {
 
 function normalizeMode(mode: SessionMode | undefined): SessionMode {
   if (mode === "plugin") return mode;
+  if (mode === "command") return mode;
   return "chat";
 }
 
@@ -1983,6 +1993,7 @@ export function App({ onGoHome }: AppProps) {
       agentMode?: string,
       effort?: string,
       fastService?: "" | "on" | "off",
+      shell?: string,
     ) => {
       if (!rootID || !sessionKey || !agent) return;
       const cacheKey = rootSessionKey(rootID, sessionKey);
@@ -2391,6 +2402,22 @@ export function App({ onGoHome }: AppProps) {
       const cacheKey = rootSessionKey(rootID, sessionKey);
       const mergeToolCall = (existing: any, incoming: any) => {
         const merged = { ...(existing || {}), ...incoming };
+        const incomingMeta = (incoming?.meta || {}) as Record<string, unknown>;
+        const isUserShellStream =
+          incomingMeta.source === "userShell" && incomingMeta.phase === "stream";
+        if (isUserShellStream) {
+          const mergedContent = [
+            ...((existing?.content || []) as any[]),
+            ...((incoming?.content || []) as any[]),
+          ];
+          const totalText = mergedContent.map((item) => item?.text || "").join("");
+          if (totalText.length > 256 * 1024) {
+            merged.content = [{ type: "text", text: totalText.slice(-256 * 1024) }];
+          } else {
+            merged.content = mergedContent;
+          }
+          merged.meta = { ...(existing?.meta || {}), ...incomingMeta };
+        }
         if (!incoming.kind && existing?.kind) merged.kind = existing.kind;
         if (!incoming.title && existing?.title) merged.title = existing.title;
         const existingStatus = `${existing?.status || ""}`.toLowerCase();
@@ -3300,26 +3327,41 @@ export function App({ onGoHome }: AppProps) {
         return;
       }
 
+      const deletedKeys = new Set<string>();
+      const collectDeletedKeys = (key: string) => {
+        if (!key || deletedKeys.has(key)) return;
+        deletedKeys.add(key);
+        for (const item of sessionsRef.current) {
+          const itemKey = item.key || item.session_key || "";
+          if (String(item.parent_session_key || "").trim() === key) {
+            collectDeletedKeys(itemKey);
+          }
+        }
+      };
+      collectDeletedKeys(sessionKey);
+
       setSessions((prev) =>
-        prev.filter((item) => (item.key || item.session_key) !== sessionKey),
+        prev.filter((item) => !deletedKeys.has(item.key || item.session_key || "")),
       );
 
-      const cacheKey = rootSessionKey(rootID, sessionKey);
-      delete sessionCacheRef.current[cacheKey];
-      delete loadedSessionRef.current[cacheKey];
-      delete loadingSessionRef.current[cacheKey];
-      delete pendingBySessionRef.current[cacheKey];
-      delete cancelRequestedBySessionRef.current[cacheKey];
-      staleSessionKeysRef.current.delete(cacheKey);
-      void deleteCachedSession(rootID, sessionKey);
+      for (const deletedKey of deletedKeys) {
+        const cacheKey = rootSessionKey(rootID, deletedKey);
+        delete sessionCacheRef.current[cacheKey];
+        delete loadedSessionRef.current[cacheKey];
+        delete loadingSessionRef.current[cacheKey];
+        delete pendingBySessionRef.current[cacheKey];
+        delete cancelRequestedBySessionRef.current[cacheKey];
+        staleSessionKeysRef.current.delete(cacheKey);
+        void deleteCachedSession(rootID, deletedKey);
+      }
 
-      if (boundSessionByRootRef.current[rootID] === sessionKey) {
+      if (deletedKeys.has(boundSessionByRootRef.current[rootID] || "")) {
         setBoundSessionForRoot(rootID, null);
       }
-      if (selectedSessionByRootRef.current[rootID] === sessionKey) {
+      if (deletedKeys.has(selectedSessionByRootRef.current[rootID] || "")) {
         selectedSessionByRootRef.current[rootID] = null;
       }
-      if (drawerSessionByRootRef.current[rootID]?.key === sessionKey) {
+      if (deletedKeys.has(drawerSessionByRootRef.current[rootID]?.key || "")) {
         setDrawerSessionForRoot(rootID, null);
         setDrawerOpenForRoot(rootID, false);
       }
@@ -3330,7 +3372,7 @@ export function App({ onGoHome }: AppProps) {
       const selectedRoot =
         (selectedSessionRef.current?.root_id as string | undefined) ||
         currentRootIdRef.current;
-      if (selectedKey === sessionKey && selectedRoot === rootID) {
+      if (deletedKeys.has(selectedKey || "") && selectedRoot === rootID) {
         setSelectedSession(null);
         setSelectedSessionLoading(false);
         replaceURLState({
@@ -3854,6 +3896,7 @@ export function App({ onGoHome }: AppProps) {
       agentMode?: string,
       effort?: string,
       fastService?: "" | "on" | "off",
+      shell?: string,
     ) => {
       const activeRoot = currentRootIdRef.current;
       if (!activeRoot) return;
@@ -3918,7 +3961,8 @@ export function App({ onGoHome }: AppProps) {
         effectiveModel = model || "",
         effectiveAgentMode = agentMode || "",
         effectiveEffort = effort || "",
-        effectiveFastService = (fastService || "") as "" | "on" | "off";
+        effectiveFastService = (fastService || "") as "" | "on" | "off",
+        effectiveShell = shell || "";
       if (sendSessionKey && session) {
         const targetSessionKey = sendSessionKey;
         const previousAgent = session.agent || "";
@@ -3945,6 +3989,12 @@ export function App({ onGoHome }: AppProps) {
           (effectiveAgent === previousAgent
             ? (((session as any).fast_service || "") as "" | "on" | "off")
             : "");
+        effectiveShell =
+          effectiveMode === "command"
+            ? ((useTargetSessionDefaults ? (session as any).shell || "" : shell) ||
+                (session as any).shell ||
+                "")
+            : "";
         updateSessionAgentForKey(
           activeRoot,
           targetSessionKey,
@@ -3961,6 +4011,7 @@ export function App({ onGoHome }: AppProps) {
           mode: effectiveAgentMode,
           effort: effectiveEffort,
           fast_service: effectiveFastService,
+          shell: effectiveShell,
         } as Session;
         setBoundSessionForRoot(activeRoot, targetSessionKey);
         setSelectedPendingByKey(targetSessionKey, true);
@@ -3979,6 +4030,7 @@ export function App({ onGoHome }: AppProps) {
           mode: effectiveAgentMode,
           effort: effectiveEffort,
           fast_service: effectiveFastService,
+          shell: effectiveShell,
           name: "新会话",
           pending: true,
         } as any;
@@ -4006,6 +4058,7 @@ export function App({ onGoHome }: AppProps) {
         agentMode: effectiveAgentMode,
         effort: effectiveEffort,
         fastService: effectiveFastService,
+        shell: effectiveShell,
         message,
         timestamp: now,
         requestId,
@@ -4025,6 +4078,7 @@ export function App({ onGoHome }: AppProps) {
           mode: effectiveAgentMode,
           effort: effectiveEffort,
           fast_service: effectiveFastService,
+          shell: effectiveShell,
           updated_at: now,
         } as Session;
         session = sessionCacheRef.current[ck];
@@ -4039,6 +4093,7 @@ export function App({ onGoHome }: AppProps) {
           agentMode: effectiveAgentMode,
           effort: effectiveEffort,
           fastService: effectiveFastService,
+          shell: effectiveShell,
           message,
           timestamp: now,
           requestId,
@@ -4111,6 +4166,7 @@ export function App({ onGoHome }: AppProps) {
         effectiveEffort || undefined,
         effectiveFastService,
         context,
+        effectiveShell || undefined,
         requestId,
       );
       console.info("[session/send] dispatched", { requestId, rootId: activeRoot, sessionKey: sendSessionKey || null, tempKey: tempKey || null, sent });
@@ -6104,6 +6160,7 @@ export function App({ onGoHome }: AppProps) {
             mode: pending.agentMode,
             effort: pending.effort,
             fast_service: pending.fastService || "",
+            shell: pending.shell || "",
           };
           const cached =
             sessionCacheRef.current[ck] ||
@@ -6115,6 +6172,7 @@ export function App({ onGoHome }: AppProps) {
               mode: pending.agentMode,
               effort: pending.effort,
               fast_service: pending.fastService || "",
+              shell: pending.shell || "",
               name: pendingName,
               created_at: pending.timestamp,
               updated_at: pending.timestamp,
@@ -6149,6 +6207,32 @@ export function App({ onGoHome }: AppProps) {
       }
       const event = payload.event;
       if (!event?.type) return;
+      const markStreamPending = () => {
+        if (event.type === "message_done" || event.type === "error") return;
+        const now = new Date().toISOString();
+        const latest = sessionCacheRef.current[ck];
+        let cacheChanged = false;
+        if (latest && !(latest as any).pending) {
+          sessionCacheRef.current[ck] = {
+            ...(latest as any),
+            pending: true,
+            updated_at: now,
+          } as Session;
+          cacheChanged = true;
+        }
+        setSelectedPendingByKey(streamKey, true);
+        const drawer = drawerSessionByRootRef.current[activeRoot];
+        if (drawer && (drawer.key || (drawer as any).session_key) === streamKey) {
+          setDrawerSessionForRoot(activeRoot, {
+            ...(drawer as any),
+            pending: true,
+            updated_at: now,
+          } as Session);
+        }
+        if (cacheChanged) {
+          bumpCacheVersion();
+        }
+      };
       const updateDrawerIfShowingStream = () => {
         const drawerKey = drawerSessionByRootRef.current[activeRoot]?.key || "";
         if (
@@ -6165,6 +6249,7 @@ export function App({ onGoHome }: AppProps) {
           } as Session);
         }
       };
+      markStreamPending();
       switch (event.type) {
         case "message_chunk":
           appendAgentChunkForSession(
@@ -6178,6 +6263,7 @@ export function App({ onGoHome }: AppProps) {
                   mode: pending.agentMode,
                   effort: pending.effort,
                   fast_service: pending.fastService || "",
+                  shell: pending.shell || "",
                 }
               : undefined,
           );
@@ -6690,6 +6776,14 @@ export function App({ onGoHome }: AppProps) {
                 fast_service:
                   normalizeFastService(payload.session.fast_service) ||
                   normalizeFastService((cached as any).fast_service),
+                parent_session_key:
+                  typeof payload.session.parent_session_key === "string"
+                    ? payload.session.parent_session_key
+                    : (cached as any).parent_session_key,
+                parent_tool_call_id:
+                  typeof payload.session.parent_tool_call_id === "string"
+                    ? payload.session.parent_tool_call_id
+                    : (cached as any).parent_tool_call_id,
                 updated_at: payload.session.updated_at || cached.updated_at,
               } as Session;
               bumpCacheVersion();
@@ -6721,6 +6815,14 @@ export function App({ onGoHome }: AppProps) {
                       fast_service:
                         normalizeFastService(payload.session.fast_service) ||
                         normalizeFastService((prev as any).fast_service),
+                      parent_session_key:
+                        typeof payload.session.parent_session_key === "string"
+                          ? payload.session.parent_session_key
+                          : (prev as any).parent_session_key,
+                      parent_tool_call_id:
+                        typeof payload.session.parent_tool_call_id === "string"
+                          ? payload.session.parent_tool_call_id
+                          : (prev as any).parent_tool_call_id,
                       updated_at: payload.session.updated_at || prev.updated_at,
                     } as SessionItem)
                   : prev,
@@ -7832,7 +7934,7 @@ export function App({ onGoHome }: AppProps) {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span>🧩</span>
+              <ModeIcon type="plugin" size={16} />
               <span>{pluginRender.plugin.name}</span>
               {pluginLoading ? (
                 <span style={{ opacity: 0.7 }}>加载中...</span>

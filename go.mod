@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/coder/acp-go-sdk v0.6.4-0.20260227160919-584abe6abe22
+	github.com/creack/pty v1.1.24
 	github.com/fanwenlin/codex-go-sdk v0.0.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-chi/chi/v5 v5.0.10
@@ -29,6 +30,6 @@ require (
 	modernc.org/memory v1.8.0 // indirect
 )
 
-replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260518073759-7bc2e8d2227f
+replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260529040326-0f827546a2cb
 
 replace github.com/roasbeef/claude-agent-sdk-go => github.com/yandc/claude-agent-sdk-go v0.0.0-20260522150919-fb65168f43b8

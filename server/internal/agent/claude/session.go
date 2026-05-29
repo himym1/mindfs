@@ -256,13 +256,47 @@ func (s *session) handleCanUseTool(ctx context.Context, req claudeagent.ToolPerm
 	if err := json.Unmarshal(req.Arguments, &updatedInput); err != nil {
 		updatedInput["questions"] = input.Questions
 	}
-	updatedAnswers := make(map[string]string, len(answers))
-	for key, value := range answers {
-		updatedAnswers[key] = value
-	}
-	updatedInput["answers"] = updatedAnswers
+	updatedInput["answers"] = normalizeAskUserAnswers(input.Questions, answers)
 
 	return claudeagent.PermissionAllow{UpdatedInput: updatedInput}
+}
+
+func normalizeAskUserAnswers(questions []claudeagent.QuestionItem, answers claudeagent.Answers) map[string]string {
+	normalized := make(map[string]string, len(answers))
+
+	for key, value := range answers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" || askUserQuestionTextForKey(key, questions) != "" {
+			continue
+		}
+		normalized[key] = value
+	}
+	for key, value := range answers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		questionText := askUserQuestionTextForKey(key, questions)
+		if questionText == "" {
+			questionText = key
+		}
+		if _, exists := normalized[questionText]; !exists {
+			normalized[questionText] = value
+		}
+	}
+
+	return normalized
+}
+
+func askUserQuestionTextForKey(key string, questions []claudeagent.QuestionItem) string {
+	for index, question := range questions {
+		if key == fmt.Sprintf("q_%d", index) {
+			return strings.TrimSpace(question.Question)
+		}
+	}
+	return ""
 }
 
 func (s *session) CurrentModel() string {
