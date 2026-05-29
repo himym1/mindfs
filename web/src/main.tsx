@@ -3,11 +3,13 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import { App } from "./App";
 import { registerServiceWorker } from "./registerServiceWorker";
+import { initializePWAInstallPromptCapture } from "./services/pwaInstallPrompt";
 import { applyAppearanceMode } from "./services/appearance";
 import { isHarmonyRuntime, isNativeShellRuntime } from "./services/runtime";
 import { Login } from "./components/Login";
 
 applyAppearanceMode();
+initializePWAInstallPromptCapture();
 
 function readableAssetPath(raw: string): string {
   const value = String(raw || "").trim();

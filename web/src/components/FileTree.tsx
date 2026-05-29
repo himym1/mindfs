@@ -3,6 +3,11 @@ import { rootBadgeStyle } from "./rootBadgeStyle";
 import { openExternalURL } from "../services/platformNavigation";
 import { isNativeShellRuntime, shouldEnablePWAInstall } from "../services/runtime";
 import {
+  clearDeferredPWAInstallPrompt,
+  subscribePWAInstallPrompt,
+  type BeforeInstallPromptEvent,
+} from "../services/pwaInstallPrompt";
+import {
   DIRECTORY_SORT_OPTIONS,
   type DirectorySortMode,
   type FileEntry,
@@ -28,11 +33,6 @@ import {
   switchAgentConfig,
   type AgentConfigBackup,
 } from "../services/agentConfig";
-
-type BeforeInstallPromptEvent = Event & {
-  prompt: () => Promise<void>;
-  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
-};
 
 const PWA_INSTALL_STATE_KEY = "mindfs-pwa-installed";
 const RELAYER_AD_DISMISS_STORAGE_KEY = "mindfs-relayer-ad-dismissed";
@@ -852,20 +852,21 @@ export function FileTree({
       setIsInstallCapable(knownInstall || isIOS || "serviceWorker" in navigator);
     };
 
-    const handleBeforeInstallPrompt = (event: Event) => {
-      event.preventDefault();
-      setDeferredInstallPrompt(event as BeforeInstallPromptEvent);
-      setIsInstallCapable(true);
-    };
+    const unsubscribeInstallPrompt = subscribePWAInstallPrompt((prompt) => {
+      setDeferredInstallPrompt(prompt);
+      if (prompt) {
+        setIsInstallCapable(true);
+      }
+    });
 
     const handleInstalled = () => {
       persistInstallState();
       setIsInstalled(true);
       setDeferredInstallPrompt(null);
+      clearDeferredPWAInstallPrompt();
     };
 
     updateInstallState();
-    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
     window.addEventListener("appinstalled", handleInstalled);
     window.addEventListener("pageshow", updateInstallState);
     document.addEventListener("visibilitychange", updateInstallState);
@@ -878,7 +879,7 @@ export function FileTree({
     fullscreenQuery.addEventListener?.("change", updateInstallState);
 
     return () => {
-      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      unsubscribeInstallPrompt();
       window.removeEventListener("appinstalled", handleInstalled);
       window.removeEventListener("pageshow", updateInstallState);
       document.removeEventListener("visibilitychange", updateInstallState);
@@ -892,32 +893,32 @@ export function FileTree({
 
   const installLabel = isKnownInstalled
     ? "已安装"
-    : isIOS
-      ? "添加到主屏幕"
+    : deferredInstallPrompt
+      ? "安装应用"
+      : isIOS
+        ? "添加到主屏幕"
       : isMacSafari
         ? "添加到 Dock"
-      : isDesktopChromium && isInstallCapable
-        ? "安装应用"
       : isAndroidChrome && !deferredInstallPrompt
         ? "从菜单安装"
-      : deferredInstallPrompt
-        ? "安装应用"
+      : isDesktopChromium
+        ? "从浏览器安装"
         : "安装说明";
 
   const installHelp = isInstalled
     ? ""
     : isKnownInstalled
       ? "已安装，可从桌面或应用列表打开"
+      : deferredInstallPrompt
+        ? "点击后打开浏览器安装弹窗"
       : isIOS
-      ? "在 Safari 中用分享菜单安装"
+        ? "在 Safari 中用分享菜单安装"
       : isMacSafari
         ? "请用 Safari 菜单 File > Add to Dock"
-      : isDesktopChromium && isInstallCapable
-        ? "可从地址栏安装图标或浏览器菜单中安装"
       : isAndroidChrome && !deferredInstallPrompt
         ? "请在浏览器菜单中选择“添加到主屏幕”或“安装应用”"
-      : deferredInstallPrompt
-        ? "安装后可从桌面独立启动"
+      : isDesktopChromium
+        ? "Chrome/Edge 用地址栏安装图标；Vivaldi 右键标签页安装"
         : "当前浏览器未提供安装弹窗";
 
   const shouldShowInstallButton = !isNativeApp && !isKnownInstalled && !(isAndroidChrome && !deferredInstallPrompt);
@@ -990,6 +991,7 @@ export function FileTree({
           setIsInstalled(true);
         }
       } finally {
+        clearDeferredPWAInstallPrompt();
         setDeferredInstallPrompt(null);
       }
       return;
@@ -1003,7 +1005,7 @@ export function FileTree({
       return;
     }
     if (isDesktopChromium && typeof window !== "undefined") {
-      window.alert("请使用地址栏右侧的安装图标，或在浏览器菜单中选择“安装 MindFS”。");
+      window.alert("当前浏览器没有把安装弹窗权限暴露给网页按钮。\n\nChrome / Edge：请使用地址栏右侧的安装图标，或在浏览器菜单中选择“安装 MindFS”。\n\nVivaldi：请右键当前标签页，在菜单中选择 Install / 安装 MindFS；如果没有该项，请用“创建快捷方式”并勾选 Open as Window。");
       return;
     }
     if (isAndroidChrome && typeof window !== "undefined") {
