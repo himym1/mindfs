@@ -129,6 +129,64 @@ func TestSyncExternalSessionFullReplacesLazyNotice(t *testing.T) {
 	}
 }
 
+func TestSyncExternalSessionFullCanImportOnlyRecentContext(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	importer := &recordingExternalImporter{imported: agenttypes.ImportedExternalSession{
+		AgentSessionID: "019e-recent",
+		Title:          "Recent history",
+		Exchanges: []agenttypes.ImportedExchange{
+			{Role: "user", Content: "old question", Timestamp: time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)},
+			{Role: "agent", Content: "old answer", Timestamp: time.Date(2026, 5, 1, 10, 0, 1, 0, time.UTC)},
+			{Role: "user", Content: "latest question", Timestamp: time.Date(2026, 5, 1, 10, 1, 0, 0, time.UTC)},
+			{Role: "agent", Content: "latest answer", Timestamp: time.Date(2026, 5, 1, 10, 1, 1, 0, time.UTC)},
+		},
+	}}
+	service := Service{Registry: &externalBindTestRegistry{root: root, manager: manager, importer: importer}}
+
+	bound, err := service.BindExternalSession(ctx, BindExternalSessionInput{
+		RootID:         "mindfs",
+		Agent:          "pi",
+		AgentSessionID: "019e-recent",
+		Title:          "Recent history",
+	})
+	if err != nil {
+		t.Fatalf("BindExternalSession returned error: %v", err)
+	}
+
+	out, err := service.SyncExternalSessionFull(ctx, SyncExternalSessionFullInput{
+		RootID:      "mindfs",
+		Key:         bound.SessionKey,
+		RecentLimit: 2,
+	})
+	if err != nil {
+		t.Fatalf("SyncExternalSessionFull returned error: %v", err)
+	}
+	if out.ImportedCount != 2 {
+		t.Fatalf("ImportedCount = %d, want 2", out.ImportedCount)
+	}
+
+	synced, err := manager.Get(ctx, bound.SessionKey, 0)
+	if err != nil {
+		t.Fatalf("Get synced session: %v", err)
+	}
+	if len(synced.Exchanges) != 2 {
+		t.Fatalf("exchange count = %d, want 2", len(synced.Exchanges))
+	}
+	if synced.Exchanges[0].Content != "latest question" || synced.Exchanges[1].Content != "latest answer" {
+		t.Fatalf("synced exchanges = %#v", synced.Exchanges)
+	}
+	binding, err := manager.FindAgentBinding(ctx, bound.SessionKey, "pi")
+	if err != nil {
+		t.Fatalf("FindAgentBinding: %v", err)
+	}
+	if binding.AgentCtxSeq != 2 {
+		t.Fatalf("AgentCtxSeq = %d, want 2", binding.AgentCtxSeq)
+	}
+}
+
 func TestSyncExternalSessionFullDedupesRepeatedSync(t *testing.T) {
 	ctx := context.Background()
 	rootDir := t.TempDir()

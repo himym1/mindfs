@@ -999,6 +999,7 @@ type AppProps = {
 };
 
 const MOBILE_ENTER_KEY_SEND_STORAGE_KEY = "mindfs-mobile-enter-key-sends";
+const RESUME_CONTEXT_SYNC_LIMIT = 2;
 
 function loadMobileEnterKeySends(): boolean {
   if (typeof window === "undefined") {
@@ -3435,6 +3436,8 @@ export function App({ onGoHome }: AppProps) {
 
       const cacheKey = rootSessionKey(rootID, sessionKey);
       try {
+        await sessionService.syncExternalSessionFull(rootID, sessionKey);
+        await deleteCachedSession(rootID, sessionKey);
         const result = await syncSession(rootID, sessionKey);
         const synced = result.session;
         if (!synced) {
@@ -3627,7 +3630,7 @@ export function App({ onGoHome }: AppProps) {
           setIsRightOpen(false);
         }
         void sessionService
-          .syncExternalSessionFull(rootID, bound.session_key)
+          .syncExternalSessionFull(rootID, bound.session_key, { limit: RESUME_CONTEXT_SYNC_LIMIT })
           .then(async (result) => {
             if (!result) {
               reportError("session.sync_failed", "同步会话失败");
@@ -3637,6 +3640,7 @@ export function App({ onGoHome }: AppProps) {
             delete sessionCacheRef.current[cacheKey];
             delete loadedSessionRef.current[cacheKey];
             markSessionStale(rootID, bound.session_key);
+            await deleteCachedSession(rootID, bound.session_key);
             const synced = await syncSession(rootID, bound.session_key);
             if (synced.session) {
               const normalized = {

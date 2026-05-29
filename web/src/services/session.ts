@@ -896,9 +896,13 @@ class SessionService {
   async syncExternalSessionFull(
     rootId: string,
     sessionKey: string,
+    options?: { limit?: number },
   ): Promise<{ imported_count: number; total_count: number } | null> {
     try {
       const params = new URLSearchParams({ root: rootId });
+      if (typeof options?.limit === "number" && options.limit > 0) {
+        params.set("limit", String(Math.floor(options.limit)));
+      }
       return await protectedJSON<{ imported_count: number; total_count: number }>(
         appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/sync-external`, params),
         { method: "POST" },

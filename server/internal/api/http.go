@@ -615,10 +615,21 @@ func (h *HTTPHandler) handleSessionSyncExternal(w http.ResponseWriter, r *http.R
 		respondError(w, http.StatusBadRequest, errInvalidRequest("session key required"))
 		return
 	}
+	recentLimit := 0
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsedLimit, err := strconv.Atoi(rawLimit)
+		if err != nil || parsedLimit < 0 {
+			respondError(w, http.StatusBadRequest, errInvalidRequest("limit must be a non-negative integer"))
+			return
+		}
+		recentLimit = parsedLimit
+	}
+
 	uc := h.service()
 	out, err := uc.SyncExternalSessionFull(r.Context(), usecase.SyncExternalSessionFullInput{
-		RootID: rootID,
-		Key:    key,
+		RootID:      rootID,
+		Key:         key,
+		RecentLimit: recentLimit,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)

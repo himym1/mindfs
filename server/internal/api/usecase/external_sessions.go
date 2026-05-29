@@ -72,8 +72,9 @@ type BindExternalSessionOutput struct {
 }
 
 type SyncExternalSessionFullInput struct {
-	RootID string
-	Key    string
+	RootID      string
+	Key         string
+	RecentLimit int
 }
 
 type SyncExternalSessionFullOutput struct {
@@ -413,7 +414,10 @@ func (s *Service) SyncExternalSessionFull(ctx context.Context, in SyncExternalSe
 		return out, err
 	}
 
-	importedExchanges := normalizeImportedExchanges(imported.Exchanges, agentName)
+	importedExchanges := limitRecentImportedExchanges(
+		normalizeImportedExchanges(imported.Exchanges, agentName),
+		in.RecentLimit,
+	)
 	if len(importedExchanges) == 0 {
 		out.TotalCount = len(current.Exchanges)
 		return out, nil
@@ -595,6 +599,13 @@ func normalizeImportedExchanges(imported []agenttypes.ImportedExchange, agentNam
 		})
 	}
 	return out
+}
+
+func limitRecentImportedExchanges(exchanges []session.Exchange, limit int) []session.Exchange {
+	if limit <= 0 || len(exchanges) <= limit {
+		return exchanges
+	}
+	return exchanges[len(exchanges)-limit:]
 }
 
 func isLazyBoundSessionNoticeOnly(current *session.Session, agentName string) bool {
