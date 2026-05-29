@@ -612,8 +612,8 @@ func isLazyBoundSessionNoticeOnly(current *session.Session, agentName string) bo
 	return strings.Contains(content, "已快速连接到") && (strings.Contains(content, "旧历史尚未导入 MindFS") || strings.Contains(content, "正在后台同步历史"))
 }
 
-func externalExchangeSignature(role, content string, timestamp time.Time) string {
-	return strings.TrimSpace(role) + "\x00" + strings.TrimSpace(content) + "\x00" + timestamp.UTC().Format(time.RFC3339Nano)
+func externalExchangeSignature(role, content string, _ time.Time) string {
+	return strings.TrimSpace(role) + "\x00" + strings.TrimSpace(content)
 }
 
 func lastExternalSyncTimestamp(exchanges []session.Exchange) time.Time {

@@ -155,6 +155,9 @@ func TestSyncExternalSessionFullDedupesRepeatedSync(t *testing.T) {
 	if _, err := service.SyncExternalSessionFull(ctx, SyncExternalSessionFullInput{RootID: "mindfs", Key: bound.SessionKey}); err != nil {
 		t.Fatalf("first SyncExternalSessionFull returned error: %v", err)
 	}
+	// Pi ACP replay can produce fresh timestamps for the same historical content.
+	// Dedupe must not depend solely on replay timestamps.
+	importer.imported.Exchanges[0].Timestamp = time.Date(2026, 5, 1, 10, 0, 30, 0, time.UTC)
 	out, err := service.SyncExternalSessionFull(ctx, SyncExternalSessionFullInput{RootID: "mindfs", Key: bound.SessionKey})
 	if err != nil {
 		t.Fatalf("second SyncExternalSessionFull returned error: %v", err)
