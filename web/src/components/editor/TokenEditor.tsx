@@ -311,10 +311,6 @@ function pasteEventHasFiles(event: ClipboardEvent | InputEvent | KeyboardEvent):
   return Array.from(dataTransfer?.items || []).some((item) => item.kind === "file");
 }
 
-function isAndroidUserAgent(): boolean {
-  return typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
-}
-
 function isKeyboardPasteInput(event: InputEvent): boolean {
   const data = event.data || "";
   return event.inputType === "insertFromPaste"
@@ -322,16 +318,6 @@ function isKeyboardPasteInput(event: InputEvent): boolean {
     || !!event.dataTransfer
     || data.includes("\n")
     || data.includes("\r");
-}
-
-function isPossibleAndroidKeyboardPaste(event: InputEvent): boolean {
-  const data = event.data || "";
-  return isAndroidUserAgent()
-    && event.inputType === "insertText"
-    && !event.isComposing
-    && data.length > 1
-    && !data.includes("\n")
-    && !data.includes("\r");
 }
 
 async function readClipboardTextFallback(): Promise<string> {
@@ -443,30 +429,10 @@ function EditorBridge({
         insert(clipboardText || inputText);
       });
     };
-    const insertFromPossibleKeyboardPaste = (event: InputEvent) => {
-      const data = event.data || "";
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      void readClipboardTextFallback().then((clipboardText) => {
-        const normalizedClipboard = clipboardText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-        const nextText = normalizedClipboard.includes("\n") && normalizedClipboard.startsWith(data)
-          ? clipboardText
-          : data;
-        editor.update(() => {
-          $insertPlainTextAtSelection(nextText);
-        });
-        rootElement.focus({ preventScroll: true });
-      });
-    };
     const handlePaste = (event: ClipboardEvent) => insertFromNativePaste(event);
     const handleBeforeInput = (event: InputEvent) => {
       if (isKeyboardPasteInput(event)) {
         insertFromNativePaste(event);
-        return;
-      }
-      if (isPossibleAndroidKeyboardPaste(event)) {
-        insertFromPossibleKeyboardPaste(event);
       }
     };
     rootElement.addEventListener("paste", handlePaste, { capture: true });
